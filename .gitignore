@@ -1,0 +1,13 @@
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Operating System Files
+.DS_Store
+.directory
+
+# IntelliJ/PyCharm (and other JetBrains IDEs) artifacts
+.idea/
+*.iws
+*.iml
+*.ipr
