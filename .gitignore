@@ -15,3 +15,8 @@ __pycache__/
 # log files and debug artifacts
 *.log
 debug_artifacts/
+
+# input and output files
+input_files/
+chemview_archive/
+
