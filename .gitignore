@@ -11,3 +11,7 @@ __pycache__/
 *.iws
 *.iml
 *.ipr
+
+# log files and debug artifacts
+*.log
+debug_artifacts/
