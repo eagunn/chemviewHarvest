@@ -15,14 +15,14 @@ CONFIG = None
 
 @dataclass
 class Config:
-    input_file: str = "s5ExportTest2.csv"
+    input_file: str = "input_files/s5ExportTest2.csv"
     download_dir: str = "downloads"
     db_path: str = "chemview_harvest.db"
     headless: bool = False
     debug_out: str = "debug_artifacts"
     archive_root: str = "chemview_archive"
 
-def open_chemview_export_file(config: Config):
+def open_chemview_export_file():
     """Open the local CSV export and return a file handle.
 
     Looks for the named file in the current working directory.
@@ -30,7 +30,7 @@ def open_chemview_export_file(config: Config):
     success, or None on failure (and prints an error message).
     """
     script_dir = Path(__file__).resolve().parent
-    csv_path = script_dir / config.input_file
+    csv_path = script_dir / CONFIG.input_file
     try:
         # Use 'utf-8-sig' to transparently handle BOM if present
         fh = csv_path.open("r", encoding="utf-8-sig")
@@ -115,7 +115,7 @@ def main(argv=None):
     Path(CONFIG.debug_out).mkdir(parents=True, exist_ok=True)
     Path(CONFIG.archive_root).mkdir(parents=True, exist_ok=True)
 
-    fh, header_fields = open_chemview_export_file(CONFIG)
+    fh, header_fields = open_chemview_export_file()
     if fh is None:
         print("Failed to open chemview export file. Exiting with error.", file=LOG_FILE)
         return 1
