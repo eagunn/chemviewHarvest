@@ -105,6 +105,27 @@ def initialize_config(argv):
     #print("Configuration initialized:", CONFIG, file=LOG_FILE)
     return
 
+def do_need_download(db, cas_val, file_type):
+    """
+    Returns True if a download is needed for the given cas_val and file_type.
+    - If no record is found, return True.
+    - If record exists but last_success_datetime is null, return True.
+    - Otherwise, return False.
+    TODO:
+     - implement cooldown logic to avoid re-downloading too frequently after failures.
+     - implement refresh logic, passing in a either a refresh interval or a
+       refresh-if-older-than datetime.
+    """
+    record = db.get_harvest_status(cas_val, file_type)
+    if not record:
+        print(f"No record found for id: {cas_val} / {file_type}", file=LOG_FILE)
+        return True
+    if not record.get('last_success_datetime'):
+        print(f"Record for id {cas_val} / {file_type} exists but no success datetime: {record}", file=LOG_FILE)
+        return True
+    print(f"DB record for id {cas_val} / {file_type}: {record}", file=LOG_FILE)
+    return False
+
 def main(argv=None):
     initialize_config(argv)
     initialize_logging()
@@ -115,8 +136,6 @@ def main(argv=None):
 
     Path(CONFIG.debug_out).mkdir(parents=True, exist_ok=True)
     Path(CONFIG.archive_root).mkdir(parents=True, exist_ok=True)
-
-    db = initialize_db_access()
 
     fh, header_fields = open_chemview_export_file()
     if fh is None:
@@ -145,13 +164,14 @@ def main(argv=None):
                 print(f"*** missing url or cas_val (url={url}, cas_val={cas_val}), skipping this entry", file=LOG_FILE)
                 continue
 
-            # use DB records to determine if we need to download files for
-            # this chemical in this run
-            record = DB.get_harvest_status(cas_val, 'html')
-            if record:
-                print(f"DB record for id {cas_val}: {record}", file=LOG_FILE)
+            # Use do_need_download to decide if we need to download
+            need_html_download = do_need_download(DB, cas_val, FileTypes.section5_html)
+            need_pdf_download = do_need_download(DB, cas_val, FileTypes.section5_pdf)
+            if not need_html_download and not need_pdf_download:
+                print(f"Skipping download for cas={cas_val}; files already downloaded.", file=LOG_FILE)
+                continue
             else:
-                print(f"No record found for id: {cas_val}", file=LOG_FILE)
+                print(f"Download needed for cas={cas_val}: html ({need_html_download}), pdf({need_pdf_download})", file=LOG_FILE)
 
             # some URLs in the export have an empty ch= field; fix those up
             url = fixup_url(url, cas_val)
@@ -160,11 +180,21 @@ def main(argv=None):
                 cas_clean = str(cas_val).strip()
                 cas_dir = Path(CONFIG.archive_root) / f"CAS-{cas_clean}"
                 cas_dir.mkdir(parents=True, exist_ok=True)
+            # TODO: need to get structs back that give us the local path to the downloaded file
             html_ok, pdf_ok = drive_file_download(url, cas_dir=cas_dir, debug_out=Path(CONFIG.debug_out), headless=CONFIG.headless)
-            if html_ok:
-                html_success_count += 1
-            if pdf_ok:
-                pdf_success_count += 1
+            # hack: for now, only update the db if we simulated a download
+            if need_html_download:
+                if html_ok:
+                    DB.log_success(cas_val, FileTypes.section5_html, str(cas_dir / "section5.html"))
+                    html_success_count += 1
+                else:
+                    DB.log_failure(cas_val, FileTypes.section5_html)
+            if need_pdf_download:
+                if pdf_ok:
+                    DB.log_success(cas_val, FileTypes.section5_pdf, str(cas_dir / "section5.pdf"))
+                    pdf_success_count += 1
+                else:
+                    DB.log_failure(cas_val, FileTypes.section5_pdf)
             print(f"Row {total_rows} processed: cas={cas_val}, html_ok={html_ok}, pdf_ok={pdf_ok}")
     finally:
         fh.close()
