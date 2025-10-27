@@ -8,10 +8,12 @@ from pathlib import Path
 import random
 import sys
 from urllib.parse import urlparse, parse_qs, urlencode
+from HarvestDB import HarvestDB
 
-# Global log file handle; will be opened in main()
+# Global variables used by many functions will be initialized in main()
 LOG_FILE = None
 CONFIG = None
+DB = None
 
 @dataclass
 class Config:
@@ -21,6 +23,11 @@ class Config:
     headless: bool = False
     debug_out: str = "debug_artifacts"
     archive_root: str = "chemview_archive"
+
+@dataclass
+class FileTypes:
+    section5_html: str = "section5_html"
+    section5_pdf: str = "section5_pdf"
 
 def open_chemview_export_file():
     """Open the local CSV export and return a file handle.
@@ -99,21 +106,17 @@ def initialize_config(argv):
     return
 
 def main(argv=None):
-
     initialize_config(argv)
-
-    global LOG_FILE
-    try:
-        LOG_FILE = Path("harvestSection5.log").open("w", encoding="utf-8")
-    except Exception as e:
-        LOG_FILE = sys.stdout
-        print(f"Warning: could not open log file harvestSection5.log: {e}; logging to stdout", file=LOG_FILE)
+    initialize_logging()
+    initialize_db_access()
 
     print("harvestSection5: ready", file=LOG_FILE)
     print("Parsed arguments ->", CONFIG, file=LOG_FILE)
 
     Path(CONFIG.debug_out).mkdir(parents=True, exist_ok=True)
     Path(CONFIG.archive_root).mkdir(parents=True, exist_ok=True)
+
+    db = initialize_db_access()
 
     fh, header_fields = open_chemview_export_file()
     if fh is None:
@@ -136,12 +139,22 @@ def main(argv=None):
                 continue  # Skip blank or all-empty lines
             print("\n***", file=LOG_FILE)  # Separator for each row processing
             total_rows += 1
-            url = (row.get(last_field) or '').strip()
             cas_val = (row.get(first_field) or '').strip() if first_field else ''
-            url = fixup_url(url, cas_val) if 'fixup_url' in globals() else url
-            if not url:
-                print("Skipping empty URL entry", file=LOG_FILE)
+            url = (row.get(last_field) or '').strip()
+            if not url or not cas_val:
+                print(f"*** missing url or cas_val (url={url}, cas_val={cas_val}), skipping this entry", file=LOG_FILE)
                 continue
+
+            # use DB records to determine if we need to download files for
+            # this chemical in this run
+            record = DB.get_harvest_status(cas_val, 'html')
+            if record:
+                print(f"DB record for id {cas_val}: {record}", file=LOG_FILE)
+            else:
+                print(f"No record found for id: {cas_val}", file=LOG_FILE)
+
+            # some URLs in the export have an empty ch= field; fix those up
+            url = fixup_url(url, cas_val)
             cas_dir = None
             if cas_val:
                 cas_clean = str(cas_val).strip()
@@ -163,6 +176,22 @@ def main(argv=None):
         print(f"PDF downloads succeeded: {pdf_success_count}", file=LOG_FILE)
     except Exception:
         pass
+
+
+def initialize_db_access() -> HarvestDB:
+    global DB
+    # Initialize the database connection
+    DB = HarvestDB(CONFIG.db_path)
+
+
+def initialize_logging():
+    global LOG_FILE
+    try:
+        LOG_FILE = Path("harvestSection5.log").open("w", encoding="utf-8")
+    except Exception as e:
+        LOG_FILE = sys.stdout
+        print(f"Warning: could not open log file harvestSection5.log: {e}; logging to stdout", file=LOG_FILE)
+
 
 if __name__ == "__main__":
     main()
