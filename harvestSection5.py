@@ -9,6 +9,7 @@ import random
 import sys
 from urllib.parse import urlparse, parse_qs, urlencode
 from HarvestDB import HarvestDB
+from drive_section5_download import drive_section5_download
 
 # Global variables used by many functions will be initialized in main()
 LOG_FILE = None
@@ -18,9 +19,8 @@ DB = None
 @dataclass
 class Config:
     input_file: str = "input_files/s5ExportTest2.csv"
-    download_dir: str = "downloads"
     db_path: str = "chemview_harvest.db"
-    headless: bool = False
+    headless: bool = False  # headless false means the browser will be displayed
     debug_out: str = "debug_artifacts"
     archive_root: str = "chemview_archive"
 
@@ -49,12 +49,6 @@ def open_chemview_export_file():
     print("First line preview:", first_line.strip() if first_line else "(empty)", file=LOG_FILE)
     header_fields = [h.strip() for h in first_line.split(',')] if first_line else []
     return fh, header_fields
-
-def drive_file_download(url, cas_dir=None, debug_out=None, headless=True):
-    """
-    Stub for drive_file_download. Returns random True/False for html_ok and pdf_ok.
-    """
-    return (random.choice([True, False]), random.choice([True, False]))
 
 def fixup_url(url, cas_val):
     """
@@ -96,7 +90,6 @@ def initialize_config(argv):
     global CONFIG
     CONFIG = Config(
         input_file=args.input_file if args.input_file is not None else Config.input_file,
-        download_dir=args.download_dir if args.download_dir is not None else Config.download_dir,
         db_path=args.db_path if args.db_path is not None else Config.db_path,
         headless=args.headless if args.headless else Config.headless,
         debug_out=args.debug_out if args.debug_out is not None else Config.debug_out,
@@ -156,7 +149,7 @@ def main(argv=None):
         for row in reader:
             if not row or all(not (v and v.strip()) for v in row.values()):
                 continue  # Skip blank or all-empty lines
-            print("\n***", file=LOG_FILE)  # Separator for each row processing
+            print("\n***", file=LOG_FILE, flush=True)  # Separator for each row processing
             total_rows += 1
             cas_val = (row.get(first_field) or '').strip() if first_field else ''
             url = (row.get(last_field) or '').strip()
@@ -171,7 +164,7 @@ def main(argv=None):
                 print(f"Skipping download for cas={cas_val}; files already downloaded.", file=LOG_FILE)
                 continue
             else:
-                print(f"Download needed for cas={cas_val}: html ({need_html_download}), pdf({need_pdf_download})", file=LOG_FILE)
+                print(f"At least one download needed for cas={cas_val}: html ({need_html_download}), pdf({need_pdf_download})", file=LOG_FILE)
 
             # some URLs in the export have an empty ch= field; fix those up
             url = fixup_url(url, cas_val)
@@ -180,22 +173,27 @@ def main(argv=None):
                 cas_clean = str(cas_val).strip()
                 cas_dir = Path(CONFIG.archive_root) / f"CAS-{cas_clean}"
                 cas_dir.mkdir(parents=True, exist_ok=True)
-            # TODO: need to get structs back that give us the local path to the downloaded file
-            html_ok, pdf_ok = drive_file_download(url, cas_dir=cas_dir, debug_out=Path(CONFIG.debug_out), headless=CONFIG.headless)
-            # hack: for now, only update the db if we simulated a download
+            #TODO need to get actual file paths back from the drive function
+            result = drive_section5_download(url, cas_dir, need_html_download, need_pdf_download, debug_out=Path(CONFIG.debug_out), headless=CONFIG.headless, LOG_FILE=LOG_FILE)
+            html_result = result['html']
+            pdf_result = result['pdf']
             if need_html_download:
-                if html_ok:
-                    DB.log_success(cas_val, FileTypes.section5_html, str(cas_dir / "section5.html"))
+                if html_result['success']:
+                    DB.log_success(cas_val, FileTypes.section5_html, html_result['path'])
                     html_success_count += 1
                 else:
                     DB.log_failure(cas_val, FileTypes.section5_html)
+                    if html_result['error']:
+                        print(f"HTML error for cas={cas_val}: {html_result['error']}", file=LOG_FILE)
             if need_pdf_download:
-                if pdf_ok:
-                    DB.log_success(cas_val, FileTypes.section5_pdf, str(cas_dir / "section5.pdf"))
+                if pdf_result['success']:
+                    DB.log_success(cas_val, FileTypes.section5_pdf, pdf_result['path'])
                     pdf_success_count += 1
                 else:
                     DB.log_failure(cas_val, FileTypes.section5_pdf)
-            print(f"Row {total_rows} processed: cas={cas_val}, html_ok={html_ok}, pdf_ok={pdf_ok}")
+                    if pdf_result['error']:
+                        print(f"PDF error for cas={cas_val}: {pdf_result['error']}", file=LOG_FILE)
+            print(f"Row {total_rows} processed: cas={cas_val}, html_ok={html_result['success']}, pdf_ok={pdf_result['success']}")
     finally:
         fh.close()
         print("Closed export file handle.", file=LOG_FILE)
