@@ -6,6 +6,7 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 import sys
+import time
 from urllib.parse import urlparse, parse_qs, urlencode
 from HarvestDB import HarvestDB
 from drive_section5_download import drive_section5_download
@@ -162,6 +163,8 @@ def main(argv=None):
     total_rows = 0
     html_success_count = 0
     pdf_success_count = 0
+    total_download_time = 0.0
+    download_calls = 0
     try:
         reader = csv.DictReader(fh, fieldnames=header_fields)
         first_field = header_fields[0]
@@ -200,7 +203,14 @@ def main(argv=None):
                 cas_dir = Path(CONFIG.archive_root) / f"CAS-{cas_clean}"
                 cas_dir.mkdir(parents=True, exist_ok=True)
             #TODO need to get actual file paths back from the drive function
+            # Time the download operation
+            start_time = time.perf_counter()
             result = drive_section5_download(url, cas_dir, need_html_download, need_pdf_download, debug_out=Path(CONFIG.debug_out), headless=CONFIG.headless, LOG_FILE=LOG_FILE)
+            end_time = time.perf_counter()
+            elapsed = end_time - start_time
+            total_download_time += elapsed
+            download_calls += 1
+            print(f"Download elapsed for cas={cas_val}: {elapsed:.3f} seconds", file=LOG_FILE)
             html_result = result['html']
             pdf_result = result['pdf']
             if need_html_download:
@@ -228,6 +238,13 @@ def main(argv=None):
         print(f"Total rows read: {total_rows}", file=LOG_FILE)
         print(f"HTML captures succeeded: {html_success_count}", file=LOG_FILE)
         print(f"PDF downloads succeeded: {pdf_success_count}", file=LOG_FILE)
+        # Log timing information
+        print(f"Total download time (seconds): {total_download_time:.3f}", file=LOG_FILE)
+        if download_calls:
+            avg = total_download_time / download_calls
+            print(f"Average download time (seconds) over {download_calls} calls: {avg:.3f}", file=LOG_FILE)
+        else:
+            print("No download calls were made; average download time N/A", file=LOG_FILE)
     except Exception:
         pass
 
