@@ -12,6 +12,9 @@
 import sqlite3
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
+import logging
+
+logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 DATABASE_FILE = 'chemview_harvest.db'
@@ -38,7 +41,7 @@ class HarvestDB:
             conn.commit()
             return cursor
         except sqlite3.Error as e:
-            print(f"Database Error: {e}")
+            logger.error("Database Error: %s", e, exc_info=True)
             return None
         finally:
             if conn:
@@ -69,7 +72,7 @@ class HarvestDB:
             return None
 
         except sqlite3.Error as e:
-            print(f"Database Read Error: {e}")
+            logger.error("Database Read Error: %s", e, exc_info=True)
             return None
         finally:
             if conn:
@@ -114,23 +117,24 @@ if __name__ == "__main__":
     test_id = "CHEM_1234"
     test_file_type = "ReportA"
 
-    print("\n--- 1. Check Initial Status ---")
+    logger.info("--- 1. Check Initial Status ---")
     status = db.get_harvest_status(test_id, test_file_type)
-    print(f"Status before any action: {status}")
+    logger.info("Status before any action: %s", status)
 
-    print("\n--- 2. Log First Failure ---")
+    logger.info("--- 2. Log First Failure ---")
     db.log_failure(test_id, test_file_type)
     status = db.get_harvest_status(test_id, test_file_type)
-    print(f"Status after failure: {status}")
+    logger.info("Status after failure: %s", status)
 
-    print("\n--- 3. Log Success ---")
+    logger.info("--- 3. Log Success ---")
     file_path = f"/data/{test_id}_{test_file_type}.pdf"
     db.log_success(test_id, test_file_type, file_path)
     status = db.get_harvest_status(test_id, test_file_type)
-    print(f"Status after success: {status}")
+    logger.info("Status after success: %s", status)
 
-    print("\n--- 4. Log a subsequent Failure (should keep success info) ---")
+    logger.info("--- 4. Log a subsequent Failure (should keep success info) ---")
     db.log_failure(test_id, test_file_type)
     status = db.get_harvest_status(test_id, test_file_type)
     # The important part: last_success_datetime and local_filepath should remain populated.
-    print(f"Status after subsequent failure: {status}")
+    logger.info("Status after subsequent failure: %s", status)
+

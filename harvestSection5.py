@@ -5,16 +5,19 @@ import argparse
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-import sys
 import time
 from urllib.parse import urlparse, parse_qs, urlencode
 from HarvestDB import HarvestDB
 from drive_section5_download import drive_section5_download
+import logging
+from logging_setup import initialize_logging
+from typing import Optional
 
 # Global variables used by many functions will be initialized in main()
-LOG_FILE = None
-CONFIG = None
-DB = None
+DB: Optional[HarvestDB] = None
+
+# module logger (will be configured by logging_setup.initialize_logging)
+logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
@@ -30,6 +33,9 @@ class FileTypes:
     section5_html: str = "section5_html"
     section5_pdf: str = "section5_pdf"
 
+# Initialize CONFIG with concrete type so static analyzers see its attributes
+CONFIG: Config = Config()
+
 def open_chemview_export_file():
     """Open the local CSV export and return a file handle.
 
@@ -43,11 +49,11 @@ def open_chemview_export_file():
         # Use 'utf-8-sig' to transparently handle BOM if present
         fh = csv_path.open("r", encoding="utf-8-sig")
     except Exception as e:
-        print(f"Error: could not open {csv_path!s}: {e}", file=LOG_FILE)
+        logger.error("Error: could not open %s: %s", csv_path, e)
         return None, None
-    print(f"Opened export file: {csv_path}", file=LOG_FILE)
+    logger.info("Opened export file: %s", csv_path)
     first_line = fh.readline()
-    print("First line preview:", first_line.strip() if first_line else "(empty)", file=LOG_FILE)
+    logger.debug("First line preview: %s", (first_line.strip() if first_line else "(empty)"))
     header_fields = [h.strip() for h in first_line.split(',')] if first_line else []
     return fh, header_fields
 
@@ -57,7 +63,7 @@ def fixup_url(url, cas_val):
     Otherwise, return the URL unchanged.
     """
     if not url or not cas_val:
-        print(f"fixup_url: missing url or cas_val (url={url}, cas_val={cas_val})", file=LOG_FILE)
+        logger.debug("fixup_url: missing url or cas_val (url=%s, cas_val=%s)", url, cas_val)
         return url
 
     new_url = url
@@ -69,9 +75,9 @@ def fixup_url(url, cas_val):
             qs['ch'] = [cas_val]
             new_query = urlencode(qs, doseq=True)
             new_url = parsed._replace(query=new_query).geturl()
-            print(f"FixedURL for chem id {cas_val} to be {new_url}", file=LOG_FILE)
+            logger.info("FixedURL for chem id %s to be %s", cas_val, new_url)
     except Exception as e:
-        print(f"fixup_url: exception {e} for url={url}, cas_val={cas_val}", file=LOG_FILE)
+        logger.debug("fixup_url: exception %s for url=%s, cas_val=%s", e, url, cas_val)
 
     return new_url
 
@@ -98,7 +104,7 @@ def initialize_config(argv):
         archive_root=args.archive_root if args.archive_root is not None else Config.archive_root,
         max_rows=args.max_rows if args.max_rows is not None else Config.max_rows
     )
-    #print("Configuration initialized:", CONFIG, file=LOG_FILE)
+    logging.info(f"Configuration initialized: {CONFIG}")
     return
 
 def do_need_download(db, cas_val, file_type):
@@ -118,7 +124,7 @@ def do_need_download(db, cas_val, file_type):
     do_download = False
     record = db.get_harvest_status(cas_val, file_type)
     if record:
-        print(f"DB record for id {cas_val} / {file_type}: {record}", file=LOG_FILE)
+        logger.debug("DB record for id %s / %s: %s", cas_val, file_type, record)
         # Extract success/failure timestamps if present
         last_success = record.get('last_success_datetime')
         last_failure = record.get('last_failure_datetime')
@@ -126,38 +132,40 @@ def do_need_download(db, cas_val, file_type):
         if not last_success:
             # If there's a prior failure, do not retry -- just log and skip
             if not last_failure:
-                print(f"Record for id {cas_val} / {file_type} exists but no success or failure recorded: {record}", file=LOG_FILE)
+                logger.debug("Record for id %s / %s exists but no success or failure recorded: %s", cas_val, file_type, record)
                 do_download = True
             else:
-                print(f"****Skipping retry FOR NOW for id {cas_val} / {file_type}, previous failure at {last_failure}",
-                      file=LOG_FILE)
+                logger.info("****Skipping retry FOR NOW for id %s / %s, previous failure at %s", cas_val, file_type, last_failure)
                 do_download = False
 
     else:
-        print(f"No record found for id: {cas_val} / {file_type}", file=LOG_FILE)
+        logger.debug("No record found for id: %s / %s", cas_val, file_type)
         do_download = True
 
-    print(f"Will attempt download: {do_download}", file=LOG_FILE)
+    logger.debug("Will attempt download: %s", do_download)
     return do_download
 
 def main(argv=None):
     initialize_config(argv)
+    # initialize centralized logging for the process before any logging calls
     initialize_logging()
     initialize_db_access()
+    # ensure static analyzers know DB is initialized
+    assert DB is not None
 
-    print("harvestSection5: ready", file=LOG_FILE)
-    print("Parsed arguments ->", CONFIG, file=LOG_FILE)
+    logger.info("harvestSection5: ready")
+    logger.debug("Parsed arguments -> %s", CONFIG)
 
     Path(CONFIG.debug_out).mkdir(parents=True, exist_ok=True)
     Path(CONFIG.archive_root).mkdir(parents=True, exist_ok=True)
 
     fh, header_fields = open_chemview_export_file()
     if fh is None:
-        print("Failed to open chemview export file. Exiting with error.", file=LOG_FILE)
+        logger.error("Failed to open chemview export file. Exiting with error.")
         return 1
 
     if header_fields is None:
-        print("Error: CSV header could not be read. Exiting with error code 2.", file=LOG_FILE)
+        logger.error("Error: CSV header could not be read. Exiting with error code 2.")
         return 2
 
     total_rows = 0
@@ -175,25 +183,25 @@ def main(argv=None):
 
             # If a max_rows limit is configured, stop after that many processed rows
             if CONFIG.max_rows is not None and total_rows >= CONFIG.max_rows:
-                print(f"\n***Reached configured max_rows={CONFIG.max_rows}; stopping processing.", file=LOG_FILE)
+                logger.info("Reached configured max_rows=%s; stopping processing.", CONFIG.max_rows)
                 break
 
-            print("\n***", file=LOG_FILE, flush=True)  # Separator for each row processing
+            logger.debug("--- starting processing of next row ---")
             total_rows += 1
             cas_val = (row.get(first_field) or '').strip() if first_field else ''
             url = (row.get(last_field) or '').strip()
             if not url or not cas_val:
-                print(f"*** missing url or cas_val (url={url}, cas_val={cas_val}), skipping this entry", file=LOG_FILE)
+                logger.warning("missing url or cas_val (url=%s, cas_val=%s), skipping this entry", url, cas_val)
                 continue
 
             # Use do_need_download to decide if we need to download
             need_html_download = do_need_download(DB, cas_val, FileTypes.section5_html)
             need_pdf_download = do_need_download(DB, cas_val, FileTypes.section5_pdf)
             if not need_html_download and not need_pdf_download:
-                print(f"Skipping download for cas={cas_val}; files already downloaded.", file=LOG_FILE)
+                logger.info("Skipping download for cas=%s; files already downloaded.", cas_val)
                 continue
             else:
-                print(f"At least one download needed for cas={cas_val}: html ({need_html_download}), pdf({need_pdf_download})", file=LOG_FILE)
+                logger.info("At least one download needed for cas=%s: html (%s), pdf(%s)", cas_val, need_html_download, need_pdf_download)
 
             # some URLs in the export have an empty ch= field; fix those up
             url = fixup_url(url, cas_val)
@@ -205,12 +213,12 @@ def main(argv=None):
             #TODO need to get actual file paths back from the drive function
             # Time the download operation
             start_time = time.perf_counter()
-            result = drive_section5_download(url, cas_dir, need_html_download, need_pdf_download, debug_out=Path(CONFIG.debug_out), headless=CONFIG.headless, LOG_FILE=LOG_FILE)
+            result = drive_section5_download(url, cas_dir, need_html_download, need_pdf_download, debug_out=Path(CONFIG.debug_out), headless=CONFIG.headless)
             end_time = time.perf_counter()
             elapsed = end_time - start_time
             total_download_time += elapsed
             download_calls += 1
-            print(f"Download elapsed for cas={cas_val}: {elapsed:.3f} seconds", file=LOG_FILE)
+            logger.info("Download elapsed for cas=%s: %.3f seconds", cas_val, elapsed)
             html_result = result['html']
             pdf_result = result['pdf']
             if need_html_download:
@@ -220,7 +228,7 @@ def main(argv=None):
                 else:
                     DB.log_failure(cas_val, FileTypes.section5_html)
                     if html_result['error']:
-                        print(f"HTML error for cas={cas_val}: {html_result['error']}", file=LOG_FILE)
+                        logger.warning("HTML error for cas=%s: %s", cas_val, html_result['error'])
             if need_pdf_download:
                 if pdf_result['success']:
                     DB.log_success(cas_val, FileTypes.section5_pdf, pdf_result['path'])
@@ -228,41 +236,35 @@ def main(argv=None):
                 else:
                     DB.log_failure(cas_val, FileTypes.section5_pdf)
                     if pdf_result['error']:
-                        print(f"PDF error for cas={cas_val}: {pdf_result['error']}", file=LOG_FILE)
+                        logger.warning("PDF error for cas=%s: %s", cas_val, pdf_result['error'])
+            # Heartbeat message always goes to console so user can tell that code is still making progress
             print(f"Row {total_rows} processed: cas={cas_val}, html_ok={html_result['success']}, pdf_ok={pdf_result['success']}")
     finally:
         fh.close()
-        print("Closed export file handle.", file=LOG_FILE)
+        logger.debug("Closed export file handle.")
     try:
-        print("\nSummary statistics:", file=LOG_FILE)
-        print(f"Total rows read: {total_rows}", file=LOG_FILE)
-        print(f"HTML captures succeeded: {html_success_count}", file=LOG_FILE)
-        print(f"PDF downloads succeeded: {pdf_success_count}", file=LOG_FILE)
+        logger.info("Summary statistics:")
+        logger.info("Total rows read: %d", total_rows)
+        logger.info("HTML captures succeeded: %d", html_success_count)
+        logger.info("PDF downloads succeeded: %d", pdf_success_count)
         # Log timing information
-        print(f"Total download time (seconds): {total_download_time:.3f}", file=LOG_FILE)
+        logger.info("Total download time (seconds): %.3f", total_download_time)
         if download_calls:
             avg = total_download_time / download_calls
-            print(f"Average download time (seconds) over {download_calls} calls: {avg:.3f}", file=LOG_FILE)
+            logger.info("Average download time (seconds) over %d calls: %.3f", download_calls, avg)
         else:
-            print("No download calls were made; average download time N/A", file=LOG_FILE)
+            logger.info("No download calls were made; average download time N/A")
     except Exception:
         pass
 
 
-def initialize_db_access() -> HarvestDB:
+def initialize_db_access() -> None:
     global DB
     # Initialize the database connection
     DB = HarvestDB(CONFIG.db_path)
-
-
-def initialize_logging():
-    global LOG_FILE
-    try:
-        LOG_FILE = Path("harvestSection5.log").open("w", encoding="utf-8")
-    except Exception as e:
-        LOG_FILE = sys.stdout
-        print(f"Warning: could not open log file harvestSection5.log: {e}; logging to stdout", file=LOG_FILE)
+    return
 
 
 if __name__ == "__main__":
+    logger.info("Starting harvest section 5.")
     main()
