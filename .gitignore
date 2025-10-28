@@ -20,3 +20,6 @@ debug_artifacts/
 input_files/
 chemview_archive/
 
+# database file
+chemview_harvest.db
+
