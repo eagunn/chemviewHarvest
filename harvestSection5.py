@@ -223,18 +223,24 @@ def main(argv=None):
             pdf_result = result['pdf']
             if need_html_download:
                 if html_result['success']:
-                    DB.log_success(cas_val, FileTypes.section5_html, html_result['path'])
+                    local_path = html_result.get('local_file_path')
+                    nav_via = html_result.get('navigate_via')
+                    DB.log_success(cas_val, FileTypes.section5_html, local_path, nav_via)
                     html_success_count += 1
                 else:
-                    DB.log_failure(cas_val, FileTypes.section5_html)
+                    nav_via = html_result.get('navigate_via')
+                    DB.log_failure(cas_val, FileTypes.section5_html, nav_via)
                     if html_result['error']:
                         logger.warning("HTML error for cas=%s: %s", cas_val, html_result['error'])
             if need_pdf_download:
                 if pdf_result['success']:
-                    DB.log_success(cas_val, FileTypes.section5_pdf, pdf_result['path'])
+                    local_path = pdf_result.get('local_file_path')
+                    nav_via = pdf_result.get('navigate_via')
+                    DB.log_success(cas_val, FileTypes.section5_pdf, local_path, nav_via)
                     pdf_success_count += 1
                 else:
-                    DB.log_failure(cas_val, FileTypes.section5_pdf)
+                    nav_via = pdf_result.get('navigate_via')
+                    DB.log_failure(cas_val, FileTypes.section5_pdf, nav_via)
                     if pdf_result['error']:
                         logger.warning("PDF error for cas=%s: %s", cas_val, pdf_result['error'])
             # Heartbeat message always goes to console so user can tell that code is still making progress

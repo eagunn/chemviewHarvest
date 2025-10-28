@@ -53,8 +53,9 @@ class HarvestDB:
 
         Returns a dict containing all columns, or None if the record doesn't exist.
         """
+        # include the new navigate_via column
         sql = f"""
-        SELECT local_filepath, last_success_datetime, last_failure_datetime
+        SELECT local_filepath, last_success_datetime, last_failure_datetime, navigate_via
         FROM {TABLE_NAME}
         WHERE chemical_id = ? AND file_type = ?;
         """
@@ -78,35 +79,38 @@ class HarvestDB:
             if conn:
                 conn.close()
 
-    def log_success(self, chemical_id: str, file_type: str, local_filepath: str) -> bool:
+    def log_success(self, chemical_id: str, file_type: str, local_filepath: str, navigate_via: str) -> bool:
         """
         Logs a successful download. Sets success datetime and clears failure datetime.
         Uses INSERT OR REPLACE to either add a new record or update an existing one.
         """
         now = datetime.now().strftime(DATE_FORMAT)
+        # When logging success we want to set the last_success_datetime and clear last_failure_datetime
+        # navigate_via is required and records how the modal/link was navigated to
         sql = f"""
         INSERT OR REPLACE INTO {TABLE_NAME} 
-        (chemical_id, file_type, local_filepath, last_success_datetime, last_failure_datetime)
-        VALUES (?, ?, ?, ?, NULL);
+        (chemical_id, file_type, local_filepath, last_success_datetime, last_failure_datetime, navigate_via)
+        VALUES (?, ?, ?, ?, NULL, ?);
         """
-        params = (chemical_id, file_type, local_filepath, now)
+        params = (chemical_id, file_type, local_filepath, now, navigate_via)
         return self._execute_query(sql, params) is not None
 
-    def log_failure(self, chemical_id: str, file_type: str) -> bool:
+    def log_failure(self, chemical_id: str, file_type: str, navigate_via: str) -> bool:
         """
         Logs a failed download attempt. Updates the failure datetime.
         It preserves any existing success status and local_filepath.
         """
         now = datetime.now().strftime(DATE_FORMAT)
 
-        # SQL to insert a new record if it doesn't exist, or update only the failure column if it does.
+        # SQL to insert a new record if it doesn't exist, or update only the failure column (and navigate_via) if it does.
         sql = f"""
-        INSERT INTO {TABLE_NAME} (chemical_id, file_type, last_failure_datetime) 
-        VALUES (?, ?, ?)
+        INSERT INTO {TABLE_NAME} (chemical_id, file_type, last_failure_datetime, navigate_via) 
+        VALUES (?, ?, ?, ?)
         ON CONFLICT (chemical_id, file_type) DO UPDATE SET
-            last_failure_datetime = excluded.last_failure_datetime;
+            last_failure_datetime = excluded.last_failure_datetime,
+            navigate_via = excluded.navigate_via;
         """
-        params = (chemical_id, file_type, now)
+        params = (chemical_id, file_type, now, navigate_via)
         return self._execute_query(sql, params) is not None
 
 
@@ -122,18 +126,18 @@ if __name__ == "__main__":
     logger.info("Status before any action: %s", status)
 
     logger.info("--- 2. Log First Failure ---")
-    db.log_failure(test_id, test_file_type)
+    db.log_failure(test_id, test_file_type, "somewhere")
     status = db.get_harvest_status(test_id, test_file_type)
     logger.info("Status after failure: %s", status)
 
     logger.info("--- 3. Log Success ---")
     file_path = f"/data/{test_id}_{test_file_type}.pdf"
-    db.log_success(test_id, test_file_type, file_path)
+    db.log_success(test_id, test_file_type, file_path, "somewhere")
     status = db.get_harvest_status(test_id, test_file_type)
     logger.info("Status after success: %s", status)
 
     logger.info("--- 4. Log a subsequent Failure (should keep success info) ---")
-    db.log_failure(test_id, test_file_type)
+    db.log_failure(test_id, test_file_type, "somewhere")
     status = db.get_harvest_status(test_id, test_file_type)
     # The important part: last_success_datetime and local_filepath should remain populated.
     logger.info("Status after subsequent failure: %s", status)

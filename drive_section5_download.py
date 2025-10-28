@@ -13,11 +13,12 @@ def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download,
     Returns a dict for each filetype: { 'html': {...}, 'pdf': {...} }
     Each dict contains: success (bool), path (Path or None), error (str or None)
     """
-    # result structure: per-filetype dict with success(bool), path(str|None), error(str|None)
+    # result structure: per-filetype dict with success(bool), local_file_path(str|None), error(str|None), navigate_via(str)
     result: Dict[str, Dict[str, Any]] = {
-        'html': {'success': False, 'path': None, 'error': None},
-        'pdf': {'success': False, 'path': None, 'error': None}
+        'html': {'success': False, 'local_file_path': None, 'error': None, 'navigate_via': ''},
+        'pdf': {'success': False, 'local_file_path': None, 'error': None, 'navigate_via': ''}
     }
+
     if url is None:
         msg = "Error: url is required but was not provided to drive_section5_download()."
         logger.error(msg)
@@ -123,11 +124,17 @@ def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download,
                         logger.debug("Clicked CO element via childModalClick/modalClick evaluate")
                     except Exception:
                         logger.debug("Going to try to dispatch a mouse event click (inner)")
-                        page.evaluate("(el) => { try{ el.dispatchEvent(new MouseEvent('click', { bubbles:true, cancelable:true })); }catch(e){ try{ el.click(); }catch(e){} } }", co_link)
+                        try:
+                            page.evaluate("(el) => { try{ el.dispatchEvent(new MouseEvent('click', { bubbles:true, cancelable:true })); }catch(e){ try{ el.click(); }catch(e){} } }", co_link)
+                        except Exception:
+                            pass
                         logger.debug("Clicked CO element via MouseEvent dispatch fallback")
                 else:
                     logger.debug("Going to try to dispatch a mouse event click (outer)")
-                    page.evaluate("(el) => { try{ el.dispatchEvent(new MouseEvent('click', { bubbles:true, cancelable:true })); }catch(e){ try{ el.click(); }catch(e){} } }", co_link)
+                    try:
+                        page.evaluate("(el) => { try{ el.dispatchEvent(new MouseEvent('click', { bubbles:true, cancelable:true })); }catch(e){ try{ el.click(); }catch(e){} } }", co_link)
+                    except Exception:
+                        pass
                     logger.debug("Clicked CO element via MouseEvent dispatch (no modalClick)")
                 try:
                     page.wait_for_timeout(2000)
@@ -164,7 +171,9 @@ def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download,
                                 fh.write(modal_html_wrapped)
                             logger.info("Saved modal HTML to %s", html_path)
                             result['html']['success'] = True
-                            result['html']['path'] = str(html_path)
+                            result['html']['local_file_path'] = str(html_path)
+                            # we get to the html modal via the main URL
+                            result['html']['navigate_via'] = url
                         except Exception as e:
                             msg = f"Failed to save modal HTML: {e}"
                             logger.exception(msg)
@@ -205,7 +214,9 @@ def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download,
                                     pf.write(resp.content)
                                 logger.info("Saved PDF to %s", pdf_path)
                                 result['pdf']['success'] = True
-                                result['pdf']['path'] = str(pdf_path)
+                                result['pdf']['local_file_path'] = str(pdf_path)
+                                # we get to the PDF via the section5 modal
+                                result['pdf']['navigate_via'] = 'section5_html'
                             else:
                                 msg = f"PDF download returned status/ctype: {resp.status_code} {resp.headers.get('content-type')}"
                                 logger.warning(msg)

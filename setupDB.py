@@ -27,6 +27,7 @@ def setup_database():
             local_filepath TEXT,
             last_success_datetime DATETIME,
             last_failure_datetime DATETIME,
+            navigate_via TEXT,
 
             -- Set the primary key as the combination of the two IDs
             PRIMARY KEY (chemical_id, file_type)
