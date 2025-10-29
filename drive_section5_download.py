@@ -8,10 +8,13 @@ from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
-def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download, debug_out=None, headless=True, LOG_FILE=None):
+def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download, debug_out=None, headless=True, LOG_FILE=None, browser=None, page=None):
     """Navigate to the given URL with Playwright and capture the CO modal HTML and PDF.
     Returns a dict for each filetype: { 'html': {...}, 'pdf': {...} }
     Each dict contains: success (bool), path (Path or None), error (str or None)
+
+    If `browser` and/or `page` are provided they will be reused. The function only
+    closes resources that it created.
     """
     # result structure: per-filetype dict with success(bool), local_file_path(str|None), error(str|None), navigate_via(str)
     result: Dict[str, Dict[str, Any]] = {
@@ -49,10 +52,32 @@ def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download,
 
     prefix = cas_dir.name
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        page = browser.new_page()
-        page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+    # Manage Playwright/browser/page reuse: only create resources we don't receive from caller
+    created_playwright = None
+    created_browser = False
+    created_page = False
+
+    try:
+        if page is None:
+            # page not provided; may need to create browser and page
+            if browser is None:
+                # create new playwright and browser
+                created_playwright = sync_playwright().start()
+                browser = created_playwright.chromium.launch(headless=headless)
+                created_browser = True
+                logger.debug("Launched new browser (headless=%s)", headless)
+            # create a new page from the provided or newly created browser
+            page = browser.new_page()
+            created_page = True
+            logger.debug("Created new page for browser reuse path")
+        else:
+            logger.debug("Reusing provided page")
+
+        # set headers on the page (no-op if page was pre-configured similarly)
+        try:
+            page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+        except Exception:
+            pass
 
         nav_ok = False
         nav_timeouts = [30000, 60000, 90000]
@@ -162,6 +187,8 @@ def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download,
 
                 if found_modal:
                     modal_html = found_modal.inner_html()
+                    # ensure pdf_url is always defined for later checks
+                    pdf_url = None
                     if need_html_download:
                         logger.info("Will attempt to save modal HTML")
                         modal_html_wrapped = f"<div class='modal-body action'>\n{modal_html}\n</div>"
@@ -180,7 +207,6 @@ def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download,
                             result['html']['error'] = msg
                     if need_pdf_download:
                         logger.info("Will attempt to find and download PDF from modal")
-                        pdf_url = None
                         match = re.search(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*title=["\']View TSCA § 5 Order["\']', modal_html, re.IGNORECASE)
                         if match:
                             pdf_url = match.group(1)
@@ -215,8 +241,8 @@ def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download,
                                 logger.info("Saved PDF to %s", pdf_path)
                                 result['pdf']['success'] = True
                                 result['pdf']['local_file_path'] = str(pdf_path)
-                                # we get to the PDF via the section5 modal
-                                result['pdf']['navigate_via'] = 'section5_html'
+                                # log the direct path to the PDF
+                                result['pdf']['navigate_via'] = pdf_url_full
                             else:
                                 msg = f"PDF download returned status/ctype: {resp.status_code} {resp.headers.get('content-type')}"
                                 logger.warning(msg)
@@ -246,6 +272,27 @@ def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download,
         except Exception:
             pass
 
-        browser.close()
         logger.info("drive_section5_download finished for %s", url)
+
+    finally:
+        # only close resources we created
+        try:
+            if created_page and page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            if created_browser and browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+            if created_playwright is not None:
+                try:
+                    created_playwright.stop()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     return result

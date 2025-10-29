@@ -26,7 +26,7 @@ class Config:
     headless: bool = False  # headless false means the browser will be displayed
     debug_out: str = "debug_artifacts"
     archive_root: str = "chemview_archive"
-    max_rows: int = None  # if set, limit number of processed (non-blank) rows
+    max_downloads: int = None  # if set, limit number of download attempts (not rows)
 
 @dataclass
 class FileTypes:
@@ -70,7 +70,8 @@ def fixup_url(url, cas_val):
     try:
         parsed = urlparse(url)
         qs = parse_qs(parsed.query)
-        ch_val = qs.get('ch', [''])[0]
+        ch_vals = qs.get('ch')
+        ch_val = ch_vals[0] if ch_vals and len(ch_vals) > 0 else ''
         if not ch_val:
             qs['ch'] = [cas_val]
             new_query = urlencode(qs, doseq=True)
@@ -92,7 +93,7 @@ def initialize_config(argv):
     parser.add_argument("--db-path", type=str, help="Path to SQLite DB")
     parser.add_argument("--debug-out", type=str, help="Debug artifacts directory")
     parser.add_argument("--archive-root", type=str, help="Archive root directory")
-    parser.add_argument("--max-rows", type=int, help="Maximum number of non-blank rows to process")
+    parser.add_argument("--max-downloads", dest='max_downloads', type=int, help="Maximum number of download attempts to perform")
     args = parser.parse_args(argv)
 
     global CONFIG
@@ -102,7 +103,7 @@ def initialize_config(argv):
         headless=args.headless if args.headless else Config.headless,
         debug_out=args.debug_out if args.debug_out is not None else Config.debug_out,
         archive_root=args.archive_root if args.archive_root is not None else Config.archive_root,
-        max_rows=args.max_rows if args.max_rows is not None else Config.max_rows
+        max_downloads=args.max_downloads if args.max_downloads is not None else Config.max_downloads
     )
     logging.info(f"Configuration initialized: {CONFIG}")
     return
@@ -148,7 +149,7 @@ def do_need_download(db, cas_val, file_type):
 def main(argv=None):
     initialize_config(argv)
     # initialize centralized logging for the process before any logging calls
-    initialize_logging()
+    initialize_logging(level=logging.DEBUG)
     initialize_db_access()
     # ensure static analyzers know DB is initialized
     assert DB is not None
@@ -158,6 +159,21 @@ def main(argv=None):
 
     Path(CONFIG.debug_out).mkdir(parents=True, exist_ok=True)
     Path(CONFIG.archive_root).mkdir(parents=True, exist_ok=True)
+
+    # Prepare a single Playwright browser/page to reuse across downloads (faster)
+    p = None
+    browser = None
+    page = None
+    try:
+        from playwright.sync_api import sync_playwright
+        p = sync_playwright().start()
+        browser = p.chromium.launch(headless=CONFIG.headless)
+        page = browser.new_page()
+        logger.info("Launched Playwright browser for reuse (headless=%s)", CONFIG.headless)
+    except Exception as e:
+        # If Playwright cannot be started here, fall back to letting the download
+        # function create/close browsers per-call (backward compatible).
+        logger.warning("Playwright not available for reuse: %s; will let download create browsers per-call", e)
 
     fh, header_fields = open_chemview_export_file()
     if fh is None:
@@ -181,13 +197,14 @@ def main(argv=None):
             if not row or all(not (v and v.strip()) for v in row.values()):
                 continue  # Skip blank or all-empty lines
 
-            # If a max_rows limit is configured, stop after that many processed rows
-            if CONFIG.max_rows is not None and total_rows >= CONFIG.max_rows:
-                logger.info("Reached configured max_rows=%s; stopping processing.", CONFIG.max_rows)
+            # If a max_downloads limit is configured, stop after that many
+            # actual download attempts (this allows skipping already-processed rows)
+            if CONFIG.max_downloads is not None and download_calls >= CONFIG.max_downloads:
+                logger.info("Reached configured max_downloads=%s; stopping processing.", CONFIG.max_downloads)
                 break
 
-            logger.debug("--- starting processing of next row ---")
             total_rows += 1
+            logger.debug(f"--- starting processing of  row {total_rows} ---")
             cas_val = (row.get(first_field) or '').strip() if first_field else ''
             url = (row.get(last_field) or '').strip()
             if not url or not cas_val:
@@ -210,10 +227,18 @@ def main(argv=None):
                 cas_clean = str(cas_val).strip()
                 cas_dir = Path(CONFIG.archive_root) / f"CAS-{cas_clean}"
                 cas_dir.mkdir(parents=True, exist_ok=True)
-            #TODO need to get actual file paths back from the drive function
-            # Time the download operation
+            # Time the download operation and reuse the browser/page when available
             start_time = time.perf_counter()
-            result = drive_section5_download(url, cas_dir, need_html_download, need_pdf_download, debug_out=Path(CONFIG.debug_out), headless=CONFIG.headless)
+            result = drive_section5_download(
+                url,
+                cas_dir,
+                need_html_download,
+                need_pdf_download,
+                debug_out=Path(CONFIG.debug_out),
+                headless=CONFIG.headless,
+                browser=browser,
+                page=page,
+            )
             end_time = time.perf_counter()
             elapsed = end_time - start_time
             total_download_time += elapsed
@@ -248,6 +273,31 @@ def main(argv=None):
     finally:
         fh.close()
         logger.debug("Closed export file handle.")
+        # Close Playwright resources we created for reuse
+        try:
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            if p is not None:
+                try:
+                    p.stop()
+                except Exception:
+                    pass
+        except Exception:
+            pass
     try:
         logger.info("Summary statistics:")
         logger.info("Total rows read: %d", total_rows)
