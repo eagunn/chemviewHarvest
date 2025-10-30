@@ -4,10 +4,10 @@
 import argparse
 import logging
 from dataclasses import dataclass
-from typing import Optional
 from logging_setup import initialize_logging
 from harvest_framework import run_harvest
 from drive_section5_download import drive_section5_download
+from file_types import FileTypes
 
 # module logger (will be configured by logging_setup.initialize_logging)
 logger = logging.getLogger(__name__)
@@ -20,11 +20,6 @@ class Config:
     debug_out: str = "debug_artifacts"
     archive_root: str = "chemview_archive"
     max_downloads: int = None  # if set, limit number of download attempts (not rows)
-
-@dataclass
-class FileTypes:
-    section5_html: str = "section5_html"
-    section5_pdf: str = "section5_pdf"
 
 # Initialize CONFIG with concrete type so static analyzers see its attributes
 CONFIG: Config = Config()

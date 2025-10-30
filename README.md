@@ -98,6 +98,9 @@ How to add a new report type (brief)
 2) Add a thin wrapper script `harvest<report>.py` (copy `harvestSection5.py`) that imports the new driver and calls:
 
 ```python
+from drive_<report>_download import drive_<report>_download
+from file_types import FileTypes
+
 run_harvest(CONFIG, drive_<report>_download, FileTypes)
 ```
 

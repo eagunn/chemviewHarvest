@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import logging
 from typing import Dict, Any
+from file_types import FileTypes
 
 logger = logging.getLogger(__name__)
 

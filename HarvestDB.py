@@ -13,6 +13,7 @@ import sqlite3
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
 import logging
+from file_types import FileTypes
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,8 @@ if __name__ == "__main__":
     # NOTE: You must run the setup script once before running this.
     db = HarvestDB()
     test_id = "CHEM_1234"
-    test_file_type = "ReportA"
+    # Use the centralized FileTypes constants for examples (keeps docs & code consistent)
+    test_file_type = FileTypes.section5_pdf
 
     logger.info("--- 1. Check Initial Status ---")
     status = db.get_harvest_status(test_id, test_file_type)
@@ -141,4 +143,3 @@ if __name__ == "__main__":
     status = db.get_harvest_status(test_id, test_file_type)
     # The important part: last_success_datetime and local_filepath should remain populated.
     logger.info("Status after subsequent failure: %s", status)
-
