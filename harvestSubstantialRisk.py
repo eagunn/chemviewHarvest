@@ -66,7 +66,7 @@ def main(argv=None):
     """
     initialize_config(argv)
     # Configure centralized logging for the process
-    initialize_logging(log_path="./harvestSubstantialRisk.log")
+    initialize_logging(log_path="./harvestSubstantialRisk.log", level=logging.DEBUG)
 
     logger.info("Starting Substantial Risk harvest via framework")
 

@@ -4,8 +4,6 @@ import time
 from pathlib import Path
 from typing import Callable, Any
 from urllib.parse import urlparse, parse_qs, urlencode
-from HarvestDB import HarvestDB
-from logging_setup import initialize_logging
 
 logger = logging.getLogger(__name__)
 
@@ -46,41 +44,20 @@ def fixup_url(url: str, cas_val: str) -> str:
     return new_url
 
 
-def do_need_download(db: HarvestDB, cas_val: str, file_type: str) -> bool:
-    do_download = False
-    record = db.get_harvest_status(cas_val, file_type)
-    if record:
-        logger.debug("DB record for id %s / %s: %s", cas_val, file_type, record)
-        last_success = record.get('last_success_datetime')
-        last_failure = record.get('last_failure_datetime')
-        if not last_success:
-            if not last_failure:
-                logger.debug("Record for id %s / %s exists but no success or failure recorded: %s", cas_val, file_type, record)
-                do_download = True
-            else:
-                logger.info("****Skipping retry FOR NOW for id %s / %s, previous failure at %s", cas_val, file_type, last_failure)
-                do_download = False
-    else:
-        logger.debug("No record found for id: %s / %s", cas_val, file_type)
-        do_download = True
-
-    logger.debug("Will attempt download: %s", do_download)
-    return do_download
-
-
 def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
     """Run the harvesting loop using the provided drive function.
     - config: object with attributes input_file, db_path, headless, debug_out, archive_root, max_downloads
-    - drive_func: callable with signature matching drive_section5_download
+    - drive_func: callable that implements report-specific download logic and DB writes
     - file_types: object with attributes for file type names (e.g., section5_html, section5_pdf)
-    - Note it is the responsibility of the caller to initialize logging.
+    - Note: it is the responsibility of the caller to initialize logging.
     """
 
     Path(config.debug_out).mkdir(parents=True, exist_ok=True)
     Path(config.archive_root).mkdir(parents=True, exist_ok=True)
 
-    db = HarvestDB(config.db_path)
-    logger.info("Connect to HarvestDB at %s", config.db_path)
+    # NOTE: DB interactions are handled inside driver modules now.
+    # The framework will pass `db_path` to drivers so they can open/manage DB access.
+    logger.debug("Drivers will manage DB using db_path=%s", config.db_path)
 
     # Attempt to start a single playwright browser for reuse. If Playwright
     # isn't available, drive_func is expected to create its own browser per call.
@@ -119,6 +96,7 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
             if not row or all(not (v and v.strip()) for v in row.values()):
                 continue
 
+            # Stop if we've reached the configured number of actual download attempts
             if config.max_downloads is not None and download_calls >= config.max_downloads:
                 logger.info("Reached configured max_downloads=%s; stopping processing.", config.max_downloads)
                 break
@@ -131,14 +109,7 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
                 logger.warning("missing url or cas_val (url=%s, cas_val=%s), skipping this entry", url, cas_val)
                 continue
 
-            need_html_download = do_need_download(db, cas_val, file_types.section5_html)
-            need_pdf_download = do_need_download(db, cas_val, file_types.section5_pdf)
-            if not need_html_download and not need_pdf_download:
-                logger.info("Skipping download for cas=%s; files already downloaded.", cas_val)
-                continue
-            else:
-                logger.info("At least one download needed for cas=%s: html (%s), pdf(%s)", cas_val, need_html_download, need_pdf_download)
-
+            # Let the driver decide whether a download is needed and perform any DB updates.
             url = fixup_url(url, cas_val)
             cas_dir = None
             if cas_val:
@@ -149,49 +120,42 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
             start_time = time.perf_counter()
             result = drive_func(
                 url,
+                cas_val,
                 cas_dir,
-                need_html_download,
-                need_pdf_download,
                 debug_out=Path(config.debug_out),
                 headless=config.headless,
-                LOG_FILE=None,
                 browser=browser,
                 page=page,
+                db=None,
+                db_path=config.db_path,
+                file_types=file_types,
             )
             end_time = time.perf_counter()
             elapsed = end_time - start_time
-            total_download_time += elapsed
-            download_calls += 1
-            logger.info("Download elapsed for cas=%s: %.3f seconds", cas_val, elapsed)
 
-            html_result = result.get('html', {})
-            pdf_result = result.get('pdf', {})
+            # If the driver attempted a download, count it towards configured max_downloads and timing
+            attempted = bool(result and result.get('attempted'))
+            if attempted:
+                total_download_time += elapsed
+                download_calls += 1
+                logger.info("Download elapsed for cas=%s: %.3f seconds", cas_val, elapsed)
 
-            if need_html_download:
-                if html_result.get('success'):
-                    local_path = html_result.get('local_file_path')
-                    nav_via = html_result.get('navigate_via')
-                    db.log_success(cas_val, file_types.section5_html, local_path, nav_via)
-                    html_success_count += 1
-                else:
-                    nav_via = html_result.get('navigate_via')
-                    db.log_failure(cas_val, file_types.section5_html, nav_via)
-                    if html_result.get('error'):
-                        logger.warning("HTML error for cas=%s: %s", cas_val, html_result.get('error'))
+            # Aggregate success counts based on driver's reported results
+            html_result = (result.get('html') if result else {}) or {}
+            pdf_result = (result.get('pdf') if result else {}) or {}
 
-            if need_pdf_download:
-                if pdf_result.get('success'):
-                    local_path = pdf_result.get('local_file_path')
-                    nav_via = pdf_result.get('navigate_via')
-                    db.log_success(cas_val, file_types.section5_pdf, local_path, nav_via)
-                    pdf_success_count += 1
-                else:
-                    nav_via = pdf_result.get('navigate_via')
-                    db.log_failure(cas_val, file_types.section5_pdf, nav_via)
-                    if pdf_result.get('error'):
-                        logger.warning("PDF error for cas=%s: %s", cas_val, pdf_result.get('error'))
+            if html_result.get('success'):
+                html_success_count += 1
+            if pdf_result.get('success'):
+                pdf_success_count += 1
 
-            # Heartbeat to console
+            # Log errors reported by driver
+            if html_result.get('error'):
+                logger.warning("HTML error for cas=%s: %s", cas_val, html_result.get('error'))
+            if pdf_result.get('error'):
+                logger.warning("PDF error for cas=%s: %s", cas_val, pdf_result.get('error'))
+
+            # Heartbeat to console (keep this printed to console as before)
             print(f"Row {total_rows} processed: cas={cas_val}, html_ok={html_result.get('success')}, pdf_ok={pdf_result.get('success')}")
 
     finally:
@@ -237,4 +201,3 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
         pass
 
     return 0
-

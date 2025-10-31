@@ -5,36 +5,99 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import logging
 from typing import Dict, Any
-from file_types import FileTypes
+from HarvestDB import HarvestDB
 
 logger = logging.getLogger(__name__)
 
-def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download, debug_out=None, headless=True, LOG_FILE=None, browser=None, page=None):
-    """Navigate to the given URL with Playwright and capture the CO modal HTML and PDF.
-    Returns a dict for each filetype: { 'html': {...}, 'pdf': {...} }
-    Each dict contains: success (bool), path (Path or None), error (str or None)
 
-    If `browser` and/or `page` are provided they will be reused. The function only
-    closes resources that it created.
+def _need_download_from_db(db, cas_val: str, file_type: str) -> bool:
+    """Return True if the driver should attempt a download for this cas/file_type.
+    Policy: if no record -> True; if record and last_success_datetime is null -> True; if last_failure exists but no success -> skip retry (False).
     """
-    # result structure: per-filetype dict with success(bool), local_file_path(str|None), error(str|None), navigate_via(str)
-    result: Dict[str, Dict[str, Any]] = {
+    record = None
+    try:
+        record = db.get_harvest_status(cas_val, file_type)
+    except Exception:
+        logger.exception("DB read failed when checking need for %s / %s", cas_val, file_type)
+        return True
+
+    if record:
+        last_success = record.get('last_success_datetime')
+        last_failure = record.get('last_failure_datetime')
+        if not last_success:
+            if not last_failure:
+                return True
+            else:
+                logger.info("****Skipping retry FOR NOW for id %s / %s, previous failure at %s", cas_val, file_type, last_failure)
+                return False
+        return False
+    else:
+        return True
+
+
+def drive_section5_download(url: str, cas_val: str, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, db_path: str = None, file_types: Any = None) -> Dict[str, Any]:
+    """Section 5 driver: decides what to download, performs navigation and downloads, and records results to DB.
+
+    If `db` is None, a HarvestDB instance will be created using `db_path`.
+
+    Returns a dict with keys:
+      - 'attempted': bool (True if any download was attempted)
+      - 'html': {success, local_file_path, error, navigate_via}
+      - 'pdf': {success, local_file_path, error, navigate_via}
+
+    This function will call db.log_success / db.log_failure as appropriate.
+    """
+    # ensure a DB instance is available
+    if db is None:
+        if not db_path:
+            msg = "Driver requires either db or db_path to be provided"
+            logger.error(msg)
+            return {'attempted': False, 'html': {'success': False, 'local_file_path': None, 'error': msg, 'navigate_via': ''}, 'pdf': {'success': False, 'local_file_path': None, 'error': msg, 'navigate_via': ''}}
+        try:
+            db = HarvestDB(db_path)
+        except Exception as e:
+            msg = f"Failed to open DB at {db_path}: {e}"
+            logger.exception(msg)
+            return {'attempted': False, 'html': {'success': False, 'local_file_path': None, 'error': msg, 'navigate_via': ''}, 'pdf': {'success': False, 'local_file_path': None, 'error': msg, 'navigate_via': ''}}
+
+    result: Dict[str, Any] = {
+        'attempted': False,
         'html': {'success': False, 'local_file_path': None, 'error': None, 'navigate_via': ''},
         'pdf': {'success': False, 'local_file_path': None, 'error': None, 'navigate_via': ''}
     }
 
-    if url is None:
-        msg = "Error: url is required but was not provided to drive_section5_download()."
+    if db is None or file_types is None:
+        msg = "Driver requires db and file_types to be provided"
         logger.error(msg)
         result['html']['error'] = msg
         result['pdf']['error'] = msg
         return result
+
+    if not cas_val:
+        msg = "cas_val is required"
+        logger.error(msg)
+        result['html']['error'] = msg
+        result['pdf']['error'] = msg
+        return result
+
+    # Decide whether to attempt downloads based on DB state
+    need_html = _need_download_from_db(db, cas_val, file_types.section5_html)
+    need_pdf = _need_download_from_db(db, cas_val, file_types.section5_pdf)
+
+    if not need_html and not need_pdf:
+        logger.info("No downloads needed for cas=%s (section5)", cas_val)
+        return result
+
+    result['attempted'] = True
+
+    # Ensure debug_out and cas_dir exist
+    if debug_out is None:
+        debug_out = Path("debug_artifacts")
+    debug_out = Path(debug_out)
+    debug_out.mkdir(parents=True, exist_ok=True)
     if cas_dir is None:
-        msg = "Error: cas_dir is required but was not provided to drive_section5_download()."
-        logger.error(msg)
-        result['html']['error'] = msg
-        result['pdf']['error'] = msg
-        return result
+        cas_dir = Path(".")
+    cas_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Start of processing for URL: %s", url)
 
@@ -45,36 +108,36 @@ def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download,
         logger.error(msg)
         result['html']['error'] = msg
         result['pdf']['error'] = msg
+        # Record failures in DB for attempted file types
+        if need_html:
+            try:
+                db.log_failure(cas_val, file_types.section5_html, '')
+            except Exception:
+                logger.exception("Failed to write failure to DB for html")
+        if need_pdf:
+            try:
+                db.log_failure(cas_val, file_types.section5_pdf, '')
+            except Exception:
+                logger.exception("Failed to write failure to DB for pdf")
         return result
 
-    if debug_out is None:
-        debug_out = Path("debug_artifacts")
-        debug_out.mkdir(parents=True, exist_ok=True)
-
-    prefix = cas_dir.name
-
-    # Manage Playwright/browser/page reuse: only create resources we don't receive from caller
     created_playwright = None
     created_browser = False
     created_page = False
 
     try:
         if page is None:
-            # page not provided; may need to create browser and page
             if browser is None:
-                # create new playwright and browser
                 created_playwright = sync_playwright().start()
                 browser = created_playwright.chromium.launch(headless=headless)
                 created_browser = True
                 logger.debug("Launched new browser (headless=%s)", headless)
-            # create a new page from the provided or newly created browser
             page = browser.new_page()
             created_page = True
             logger.debug("Created new page for browser reuse path")
         else:
             logger.debug("Reusing provided page")
 
-        # set headers on the page (no-op if page was pre-configured similarly)
         try:
             page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
         except Exception:
@@ -190,7 +253,7 @@ def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download,
                     modal_html = found_modal.inner_html()
                     # ensure pdf_url is always defined for later checks
                     pdf_url = None
-                    if need_html_download:
+                    if need_html:
                         logger.info("Will attempt to save modal HTML")
                         modal_html_wrapped = f"<div class='modal-body action'>\n{modal_html}\n</div>"
                         html_path = cas_dir / "section5summary.html"
@@ -202,11 +265,19 @@ def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download,
                             result['html']['local_file_path'] = str(html_path)
                             # we get to the html modal via the main URL
                             result['html']['navigate_via'] = url
+                            try:
+                                db.log_success(cas_val, file_types.section5_html, str(html_path), result['html']['navigate_via'])
+                            except Exception:
+                                logger.exception("Failed to write success to DB for html")
                         except Exception as e:
                             msg = f"Failed to save modal HTML: {e}"
                             logger.exception(msg)
                             result['html']['error'] = msg
-                    if need_pdf_download:
+                            try:
+                                db.log_failure(cas_val, file_types.section5_html, '')
+                            except Exception:
+                                logger.exception("Failed to write failure to DB for html")
+                    if need_pdf:
                         logger.info("Will attempt to find and download PDF from modal")
                         match = re.search(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*title=["\']View TSCA § 5 Order["\']', modal_html, re.IGNORECASE)
                         if match:
@@ -230,7 +301,7 @@ def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download,
                                 filename = Path(parsed.path).name if parsed.path else ''
                             filename = filename.replace('/', '_').strip()
                             if not filename:
-                                filename = f"{prefix}-section5.pdf"
+                                filename = f"{cas_val}-section5.pdf"
                             if not filename.lower().endswith('.pdf'):
                                 filename = filename + '.pdf'
                             logger.info("Downloading PDF from: %s -> saving as: %s (cas_dir=%s)", pdf_url_full, filename, cas_dir)
@@ -244,32 +315,69 @@ def drive_section5_download(url, cas_dir, need_html_download, need_pdf_download,
                                 result['pdf']['local_file_path'] = str(pdf_path)
                                 # log the direct path to the PDF
                                 result['pdf']['navigate_via'] = pdf_url_full
+                                try:
+                                    db.log_success(cas_val, file_types.section5_pdf, str(pdf_path), result['pdf']['navigate_via'])
+                                except Exception:
+                                    logger.exception("Failed to write success to DB for pdf")
                             else:
                                 msg = f"PDF download returned status/ctype: {resp.status_code} {resp.headers.get('content-type')}"
                                 logger.warning(msg)
                                 result['pdf']['error'] = msg
+                                try:
+                                    db.log_failure(cas_val, file_types.section5_pdf, '')
+                                except Exception:
+                                    logger.exception("Failed to write failure to DB for pdf")
                         except Exception as e:
                             msg = f"Error downloading PDF: {e}"
                             logger.exception(msg)
                             result['pdf']['error'] = msg
+                            try:
+                                db.log_failure(cas_val, file_types.section5_pdf, '')
+                            except Exception:
+                                logger.exception("Failed to write failure to DB for pdf")
+                else:
+                    msg = "Expected Section 5 modal not found"
+                    logger.warning(msg)
+                    if need_html:
+                        result['html']['error'] = msg
+                        try:
+                            db.log_failure(cas_val, file_types.section5_html, '')
+                        except Exception:
+                            logger.exception("Failed to write failure to DB for html")
+                    if need_pdf:
+                        result['pdf']['error'] = msg
+                        try:
+                            db.log_failure(cas_val, file_types.section5_pdf, '')
+                        except Exception:
+                            logger.exception("Failed to write failure to DB for pdf")
             except Exception as e:
                 msg = f"Error waiting for or capturing modal: {e}"
                 logger.exception(msg)
                 result['html']['error'] = msg
+                try:
+                    if need_html:
+                        db.log_failure(cas_val, file_types.section5_html, '')
+                except Exception:
+                    logger.exception("Failed to write failure to DB for html")
         else:
             msg = "No appropriate CO link found on page"
             logger.warning(msg)
-            result['html']['error'] = msg
+            if need_html:
+                result['html']['error'] = msg
+                try:
+                    db.log_failure(cas_val, file_types.section5_html, '')
+                except Exception:
+                    logger.exception("Failed to write failure to DB for html")
 
         try:
             page_html = page.content()
-            (debug_out / f"{prefix}.html").write_text(page_html, encoding='utf-8')
-            logger.debug("Saved full page HTML to %s", debug_out / f"{prefix}.html")
+            (debug_out / f"{cas_val}.html").write_text(page_html, encoding='utf-8')
+            logger.debug("Saved full page HTML to %s", debug_out / f"{cas_val}.html")
         except Exception as e:
             logger.exception("Failed to save full page HTML: %s", e)
 
         try:
-            page.screenshot(path=str(debug_out / f"{prefix}.png"), full_page=True)
+            page.screenshot(path=str(debug_out / f"{cas_val}.png"), full_page=True)
         except Exception:
             pass
 
