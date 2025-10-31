@@ -65,8 +65,8 @@ def main(argv=None):
     consolidates the shared behavior.
     """
     initialize_config(argv)
-    # Configure centralized logging for the process (keeps prior behavior)
-    initialize_logging(log_path="./harvestSubstantialRisk.log", console=True)
+    # Configure centralized logging for the process
+    initialize_logging(log_path="./harvestSubstantialRisk.log")
 
     logger.info("Starting Substantial Risk harvest via framework")
 

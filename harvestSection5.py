@@ -65,8 +65,8 @@ def main(argv=None):
     consolidates the shared behavior.
     """
     initialize_config(argv)
-    # Configure centralized logging for the process (keeps prior behavior)
-    initialize_logging()
+    # Configure centralized logging for the process
+    initialize_logging(log_path="./harvestSection5.log")
 
     logger.info("Starting Section 5 harvest via framework")
 

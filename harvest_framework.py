@@ -70,21 +70,17 @@ def do_need_download(db: HarvestDB, cas_val: str, file_type: str) -> bool:
 
 def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
     """Run the harvesting loop using the provided drive function.
-
     - config: object with attributes input_file, db_path, headless, debug_out, archive_root, max_downloads
     - drive_func: callable with signature matching drive_section5_download
     - file_types: object with attributes for file type names (e.g., section5_html, section5_pdf)
+    - Note it is the responsibility of the caller to initialize logging.
     """
-    # Ensure logging is initialized (caller may already have done this)
-    try:
-        initialize_logging()
-    except Exception:
-        pass
 
     Path(config.debug_out).mkdir(parents=True, exist_ok=True)
     Path(config.archive_root).mkdir(parents=True, exist_ok=True)
 
     db = HarvestDB(config.db_path)
+    logger.info("Connect to HarvestDB at %s", config.db_path)
 
     # Attempt to start a single playwright browser for reuse. If Playwright
     # isn't available, drive_func is expected to create its own browser per call.
@@ -108,6 +104,7 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
         logger.error("Error: CSV header could not be read. Exiting with error code 2.")
         return 2
 
+    logger.debug("Chemview CSV file opened and we have header fields")
     total_rows = 0
     html_success_count = 0
     pdf_success_count = 0
