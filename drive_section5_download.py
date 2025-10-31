@@ -47,11 +47,6 @@ def drive_section5_download(url: str, cas_val: str, cas_dir: Path, debug_out=Non
 
     This function will call db.log_success / db.log_failure as appropriate.
     """
-    # If db not provided, we can't run
-    if db is None:
-        msg = "Driver requires db, but none provided"
-        logger.error(msg)
-        return {'attempted': False, 'html': {'success': False, 'local_file_path': None, 'error': 'no db', 'navigate_via': ''}, 'pdf': {'success': False, 'local_file_path': None, 'error': 'no db', 'navigate_via': ''}}
 
     result: Dict[str, Any] = {
         'attempted': False,

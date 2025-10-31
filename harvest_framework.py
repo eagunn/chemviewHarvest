@@ -80,6 +80,10 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
         p = sync_playwright().start()
         browser = p.chromium.launch(headless=config.headless)
         page = browser.new_page()
+        try:
+            page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+        except Exception:
+            logger.warning("Failed to set extra_http_headers")
         logger.info("Launched Playwright browser for reuse (headless=%s)", config.headless)
     except Exception as e:
         logger.warning("Playwright not available for reuse: %s; will let download create browsers per-call", e)
@@ -129,6 +133,7 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
                 cas_dir.mkdir(parents=True, exist_ok=True)
 
             start_time = time.perf_counter()
+            logger.debug(f"about to call driver for cas={cas_val}, url={url}")
             result = drive_func(
                 url,
                 cas_val,
