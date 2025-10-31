@@ -28,21 +28,15 @@ def _need_download_from_db(db, cas_val: str, file_type: str) -> bool:
         return True
 
 
-def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, db_path: str = None, file_types: Any = None) -> Dict[str, Any]:
+def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, file_types: Any = None) -> Dict[str, Any]:
     """Stub substantial risk driver. Uses DB to decide whether to attempt, then returns random outcomes and logs them to DB.
     Returns dict with 'attempted' and per-file results similar to other drivers.
     """
-    # If db not provided, open using db_path
+    # If db not provided, we can't run
     if db is None:
-        if not db_path:
-            msg = "Driver requires either db or db_path"
-            logger.error(msg)
-            return {'attempted': False, 'html': {'success': False, 'local_file_path': None, 'error': msg, 'navigate_via': ''}, 'pdf': {'success': False, 'local_file_path': None, 'error': msg, 'navigate_via': ''}}
-        try:
-            db = HarvestDB(db_path)
-        except Exception:
-            logger.exception("Failed to open DB at %s", db_path)
-            return {'attempted': False, 'html': {'success': False, 'local_file_path': None, 'error': 'db open failed', 'navigate_via': ''}, 'pdf': {'success': False, 'local_file_path': None, 'error': 'db open failed', 'navigate_via': ''}}
+        msg = "Driver requires db, but none provided"
+        logger.error(msg)
+        return {'attempted': False, 'html': {'success': False, 'local_file_path': None, 'error': 'no db', 'navigate_via': ''}, 'pdf': {'success': False, 'local_file_path': None, 'error': 'no db', 'navigate_via': ''}}
 
     result: Dict[str, Any] = {
         'attempted': False,

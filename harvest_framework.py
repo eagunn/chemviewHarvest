@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Callable, Any
 from urllib.parse import urlparse, parse_qs, urlencode
+from HarvestDB import HarvestDB
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +56,19 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
     Path(config.debug_out).mkdir(parents=True, exist_ok=True)
     Path(config.archive_root).mkdir(parents=True, exist_ok=True)
 
-    # NOTE: DB interactions are handled inside driver modules now.
-    # The framework will pass `db_path` to drivers so they can open/manage DB access.
-    logger.debug("Drivers will manage DB using db_path=%s", config.db_path)
+    # NOTE: Most DB interactions are handled inside driver modules now.
+    # But we open the DB here and pass its handle to the driver.
+    db = None
+    if not config.db_path:
+        msg = "No db_path provided"
+        logger.error(msg)
+        return 3
+    try:
+        db = HarvestDB(config.db_path)
+    except Exception as e:
+        msg = f"Failed to open DB at {config.db_path}: {e}"
+        logger.exception(msg)
+        return 3
 
     # Attempt to start a single playwright browser for reuse. If Playwright
     # isn't available, drive_func is expected to create its own browser per call.
@@ -126,8 +137,7 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
                 headless=config.headless,
                 browser=browser,
                 page=page,
-                db=None,
-                db_path=config.db_path,
+                db=db,
                 file_types=file_types,
             )
             end_time = time.perf_counter()

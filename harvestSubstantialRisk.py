@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Config:
     input_file: str = "input_files/srExportTest2.csv"
-    db_path: str = "chemview_harvest.db"
+    #************** TEMP DB FOR TESTING *****************
+    db_path: str = "chemview_test.db"
     headless: bool = False  # headless false means the browser will be displayed
     debug_out: str = "debug_artifacts"
     archive_root: str = "chemview_archive"
