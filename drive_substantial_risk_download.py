@@ -93,12 +93,12 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
         # Record failures in DB for attempted file types
         if need_html:
             try:
-                db.log_failure(cas_val, file_types.section5_html, '')
+                db.log_failure(cas_val, file_types.substantial_risk_html, '')
             except Exception:
                 logger.exception("Failed to write failure to DB for html")
         if need_pdf:
             try:
-                db.log_failure(cas_val, file_types.section5_pdf, '')
+                db.log_failure(cas_val, file_types.substantial_risk_pdf, '')
             except Exception:
                 logger.exception("Failed to write failure to DB for pdf")
         return result
@@ -111,6 +111,80 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
 
     sr_link = find_link_to_next_modal(page)
 
+    page = click_anchor_link_and_wait_for_modal(page, sr_link)
+
+    pdf_link_list = None
+    if need_pdf:
+        pdf_link_list = scrape_modal_html_and_gather_pdf_links(page, need_html, need_pdf, cas_dir, cas_val, db, file_types, url, result)
+
+    if pdf_link_list:
+        download_pdfs(pdf_link_list, cas_dir)
+        result['pdf']['success'] = True
+        result['pdf']['local_file_path'] = str(cas_dir / "substantialRiskReports")
+        result['pdf']['navigate_via'] = url
+        try:
+            db.log_success(cas_val, file_types.substantial_risk_pdf, result['pdf']['local_file_path'],
+                           result['pdf']['navigate_via'])
+        except Exception:
+            logger.exception("Failed to write success to DB for pdf")
+    return result
+
+def scrape_modal_html_and_gather_pdf_links(
+    page, need_html: bool, need_pdf: bool, cas_dir: Path, cas_val, db, file_types: Any, url: str, result: Dict[str, Any]
+) -> Any:
+    logger.info("Waiting for Substantial Risk Reports modal to appear...")
+    try:
+        page.wait_for_selector("div.modal-body.action", timeout=10000)
+
+        # Assume there is only one modal-body action div and it is the outermost one
+        found_modal = page.query_selector("div.modal-body.action")
+        if found_modal:
+            modal_html = found_modal.inner_html()
+            # ensure pdf_url is always defined for later checks
+            pdf_link_list = []
+            if need_html:
+                logger.info("Will attempt to save modal HTML")
+                modal_html_wrapped = f"<div class='modal-body action'>\n{modal_html}\n</div>"
+                html_path = cas_dir / "substantialRiskSubmissionReport.html"
+                try:
+                    with open(html_path, 'w', encoding='utf-8') as fh:
+                        fh.write(modal_html_wrapped)
+                    logger.info("Saved modal HTML to %s", html_path)
+                    result['html']['success'] = True
+                    result['html']['local_file_path'] = str(html_path)
+                    # we get to the html modal via the main URL
+                    result['html']['navigate_via'] = url
+                    try:
+                        db.log_success(cas_val, file_types.substantial_risk_html, str(html_path),
+                                       result['html']['navigate_via'])
+                    except Exception:
+                        logger.exception("Failed to write success to DB for html")
+                except Exception as e:
+                    logger.exception("Failed to save modal HTML: %s", e)
+                    result['html']['error'] = str(e)
+            if need_pdf:
+                logger.info("Will attempt to find all PDF download links in the modal")
+                try:
+                    pdf_anchors = found_modal.query_selector_all("li a.show_external_link")
+                    for anchor in pdf_anchors:
+                        href = anchor.get_attribute("href")
+                        if href:
+                            # Fix the URL if it starts with 'proxy'
+                            if href.startswith("proxy"):
+                                href = f"https://chemview.epa.gov/chemview/{href}"
+                            pdf_link_list.append(href)
+                    logger.info("Found %d PDF download links", len(pdf_link_list))
+                except Exception as e:
+                    logger.exception("Error while finding PDF download links: %s", e)
+            return pdf_link_list
+        else:
+            logger.error("No modal-body action div found on the page.")
+    except Exception as e:
+        logger.exception("Error while waiting for or processing the modal: %s", e)
+    return []
+
+
+def click_anchor_link_and_wait_for_modal(page, sr_link: Any | None):
     # If we found the sr/8e link, then click it to open the summary modal.
     # We always need to open the modal, even if we don't need to save
     # its HTML, because we need to get a download link from it.
@@ -148,11 +222,7 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
     except Exception as e:
         logger.error("Failed to click global SR/8e element: %s", e)
 
-    logger.info("Waiting for TSCA SECTION 5 ORDER modal to appear...")
-
-    input("Inspect page and then hit Enter to continue...")
-
-    return result
+    return page
 
 
 def find_link_to_next_modal(page):
@@ -166,7 +236,7 @@ def find_link_to_next_modal(page):
     for a in anchors:
         try:
             text = a.inner_text().strip()  # visible text (use text_content() for raw)
-            logger.debug("anchor text: %s", text)
+            #logger.debug("anchor text: %s", text)
             if text.startswith("* TSCA \u00A7 8(e) Submission"):
                 sr_link = a
                 logger.info("Found SR/8e link")
@@ -204,3 +274,46 @@ def navigate_to_initial_page(page, url):
         else:
             logger.info("Initial navigation succeeded on attemtp %d", attempt)
     return page
+
+def download_pdfs(pdf_links: list[str], cas_dir: Path) -> None:
+    """Download all PDFs from the provided list of links and save them in the substantialRiskReports folder."""
+    # Ensure the substantialRiskReports folder exists
+    reports_dir = cas_dir / "substantialRiskReports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    for pdf_url in pdf_links:
+        try:
+            pdf_url_unescaped = html_lib.unescape(pdf_url)
+            if pdf_url_unescaped.startswith('/'):
+                pdf_url_full = f"https://chemview.epa.gov{pdf_url_unescaped}"
+            else:
+                pdf_url_full = pdf_url_unescaped
+
+            parsed = urlparse(pdf_url_unescaped)
+            filename = ''
+            try:
+                qs = parse_qs(parsed.query)
+                if 'filename' in qs and qs['filename']:
+                    filename = qs['filename'][0]
+            except Exception:
+                filename = ''
+
+            if not filename:
+                filename = Path(parsed.path).name if parsed.path else ''
+            filename = filename.replace('/', '_').strip()
+            if not filename:
+                filename = "unknown-substantialRisk.pdf"
+            if not filename.lower().endswith('.pdf'):
+                filename = filename + '.pdf'
+
+            logger.info("Downloading PDF from: %s -> saving as: %s (reports_dir=%s)", pdf_url_full, filename, reports_dir)
+            resp = requests.get(pdf_url_full, timeout=30)
+            if resp.status_code == 200 and resp.headers.get('content-type', '').startswith('application/pdf'):
+                pdf_path = reports_dir / filename
+                with open(pdf_path, 'wb') as pf:
+                    pf.write(resp.content)
+                logger.info("Saved PDF to %s", pdf_path)
+            else:
+                logger.warning("Failed to download PDF from %s: status=%d, content-type=%s", pdf_url_full, resp.status_code, resp.headers.get('content-type', ''))
+        except Exception as e:
+            logger.exception("Error downloading PDF from %s: %s", pdf_url, e)
