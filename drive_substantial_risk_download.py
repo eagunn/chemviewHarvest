@@ -4,9 +4,11 @@ import html as html_lib
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from file_types import FileTypes
 from HarvestDB import HarvestDB
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +111,7 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
 
     page = navigate_to_initial_page(page, url)
 
-    sr_link = find_link_to_next_modal(page)
+    sr_link = find_submission_link_on_first_modal(page)
 
     page = click_anchor_link_and_wait_for_modal(page, sr_link)
 
@@ -225,7 +227,7 @@ def click_anchor_link_and_wait_for_modal(page, sr_link: Any | None):
     return page
 
 
-def find_link_to_next_modal(page):
+def find_submission_link_on_first_modal(page):
     try:
         anchors = page.query_selector_all("a[href]")
         logger.debug("Found %d href anchors on page", len(anchors))
@@ -275,45 +277,73 @@ def navigate_to_initial_page(page, url):
             logger.info("Initial navigation succeeded on attemtp %d", attempt)
     return page
 
-def download_pdfs(pdf_links: list[str], cas_dir: Path) -> None:
-    """Download all PDFs from the provided list of links and save them in the substantialRiskReports folder."""
+def download_pdfs(pdf_links: list[str], cas_dir: Path, session: Optional[requests.Session] = None) -> None:
+    """Download PDFs reusing an HTTPS session/pool. If `session` is None, create and close one here."""
     # Ensure the substantialRiskReports folder exists
     reports_dir = cas_dir / "substantialRiskReports"
     reports_dir.mkdir(parents=True, exist_ok=True)
 
-    for pdf_url in pdf_links:
-        try:
-            pdf_url_unescaped = html_lib.unescape(pdf_url)
-            if pdf_url_unescaped.startswith('/'):
-                pdf_url_full = f"https://chemview.epa.gov{pdf_url_unescaped}"
-            else:
-                pdf_url_full = pdf_url_unescaped
+    created_session = False
+    s = session
+    if s is None:
+        created_session = True
+        s = requests.Session()
+        # Configure session with connection pooling and retries
+        adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=Retry(total=2, backoff_factor=0.5))
+        s.mount("https://", adapter)
+        s.headers.update({"User-Agent": "substantialRiskDownloader/1.0", "Connection": "keep-alive"})
 
-            parsed = urlparse(pdf_url_unescaped)
-            filename = ''
+    try:
+        for pdf_url in pdf_links:
             try:
-                qs = parse_qs(parsed.query)
-                if 'filename' in qs and qs['filename']:
-                    filename = qs['filename'][0]
+                pdf_url_unescaped = html_lib.unescape(pdf_url or "")
+                # Normalize proxy-relative URLs
+                if pdf_url_unescaped.startswith("proxy"):
+                    pdf_url_full = f"https://chemview.epa.gov/chemview/{pdf_url_unescaped}"
+                elif pdf_url_unescaped.startswith("/"):
+                    pdf_url_full = f"https://chemview.epa.gov{pdf_url_unescaped}"
+                else:
+                    pdf_url_full = pdf_url_unescaped
+
+                parsed = urlparse(pdf_url_unescaped)
+                filename = ""
+                try:
+                    qs = parse_qs(parsed.query)
+                    if "filename" in qs and qs["filename"]:
+                        filename = qs["filename"][0]
+                except Exception:
+                    filename = ""
+
+                if not filename:
+                    filename = Path(parsed.path).name if parsed.path else ""
+                filename = filename.replace("/", "_").strip()
+                if not filename:
+                    filename = "unknown-substantialRisk.pdf"
+                if not filename.lower().endswith(".pdf"):
+                    filename = filename + ".pdf"
+
+                logger.info("Downloading PDF from: %s -> %s", pdf_url_full, filename)
+                with s.get(pdf_url_full, timeout=30, stream=True) as resp:
+                    if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("application/pdf"):
+                        pdf_path = reports_dir / filename
+                        with open(pdf_path, "wb") as pf:
+                            for chunk in resp.iter_content(chunk_size=8192):
+                                if chunk:
+                                    pf.write(chunk)
+                        logger.info("Saved PDF to %s", pdf_path)
+                    else:
+                        logger.warning(
+                            "Failed to download PDF from %s: status=%s, content-type=%s",
+                            pdf_url_full,
+                            resp.status_code,
+                            resp.headers.get("content-type", ""),
+                        )
+            except Exception as e:
+                logger.exception("Error downloading PDF from %s: %s", pdf_url, e)
+    finally:
+        if created_session and s is not None:
+            try:
+                s.close()
             except Exception:
-                filename = ''
+                pass
 
-            if not filename:
-                filename = Path(parsed.path).name if parsed.path else ''
-            filename = filename.replace('/', '_').strip()
-            if not filename:
-                filename = "unknown-substantialRisk.pdf"
-            if not filename.lower().endswith('.pdf'):
-                filename = filename + '.pdf'
-
-            logger.info("Downloading PDF from: %s -> saving as: %s (reports_dir=%s)", pdf_url_full, filename, reports_dir)
-            resp = requests.get(pdf_url_full, timeout=30)
-            if resp.status_code == 200 and resp.headers.get('content-type', '').startswith('application/pdf'):
-                pdf_path = reports_dir / filename
-                with open(pdf_path, 'wb') as pf:
-                    pf.write(resp.content)
-                logger.info("Saved PDF to %s", pdf_path)
-            else:
-                logger.warning("Failed to download PDF from %s: status=%d, content-type=%s", pdf_url_full, resp.status_code, resp.headers.get('content-type', ''))
-        except Exception as e:
-            logger.exception("Error downloading PDF from %s: %s", pdf_url, e)
