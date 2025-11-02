@@ -18,8 +18,11 @@ debug_artifacts/
 
 # input and output files
 input_files/
-chemview_archive/
+chemview_archive*/
 
-# database file
+# database files don't go in the repo for now
 *.db
+
+# report files 
+*.txt
 
