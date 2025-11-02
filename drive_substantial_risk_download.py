@@ -47,8 +47,8 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
     """
     result: Dict[str, Any] = {
         'attempted': False,
-        'html': {'success': False, 'local_file_path': None, 'error': None, 'navigate_via': ''},
-        'pdf': {'success': False, 'local_file_path': None, 'error': None, 'navigate_via': ''}
+        'html': {'success': None, 'local_file_path': None, 'error': None, 'navigate_via': ''},
+        'pdf': {'success': None, 'local_file_path': None, 'error': None, 'navigate_via': ''}
     }
 
     if db is None or file_types is None:
@@ -109,31 +109,41 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
         logger.error("No page provided for URL: %s", url)
         return result
 
-    page = navigate_to_initial_page(page, url)
-
-    sr_link = find_submission_link_on_first_modal(page)
-    if sr_link is None:
-        msg = "No Substantial Risk / 8e link found on initial page"
+    nav_ok = navigate_to_initial_page(page, url)
+    if nav_ok is False:
+        msg = "Navigation to initial page failed"
         logger.error(msg)
-        # don't waste anymore time on this entry
+        result['html']['error'] = msg
+        result['pdf']['error'] = msg
+        # don't waste any more time on this entry
         return result
 
-    page = click_anchor_link_and_wait_for_modal(page, sr_link)
+    sr_link_list = find_submission_link_on_first_modal(page)
+    if not sr_link_list:
+        msg = "No Substantial Risk / 8e links found on initial page"
+        logger.error(msg)
+        result['html']['error'] = msg
+        result['pdf']['error'] = msg
+        # don't waste any more time on this entry
+        return result
 
-    pdf_link_list = None
-    if need_pdf:
-        pdf_link_list = scrape_modal_html_and_gather_pdf_links(page, need_html, need_pdf, cas_dir, cas_val, db, file_types, url, result)
+    for sr_link in sr_link_list:
+        page = click_anchor_link_and_wait_for_modal(page, sr_link)
 
-    if pdf_link_list:
-        download_pdfs(pdf_link_list, cas_dir)
-        result['pdf']['success'] = True
-        result['pdf']['local_file_path'] = str(cas_dir / "substantialRiskReports")
-        result['pdf']['navigate_via'] = url
-        try:
-            db.log_success(cas_val, file_types.substantial_risk_pdf, result['pdf']['local_file_path'],
-                           result['pdf']['navigate_via'])
-        except Exception:
-            logger.exception("Failed to write success to DB for pdf")
+        pdf_link_list = None
+        if need_pdf:
+            pdf_link_list = scrape_modal_html_and_gather_pdf_links(page, need_html, need_pdf, cas_dir, cas_val, db, file_types, url, result)
+
+        if pdf_link_list:
+            download_pdfs(pdf_link_list, cas_dir)
+            result['pdf']['success'] = True
+            result['pdf']['local_file_path'] = str(cas_dir / "substantialRiskReports")
+            result['pdf']['navigate_via'] = url
+            try:
+                db.log_success(cas_val, file_types.substantial_risk_pdf, result['pdf']['local_file_path'],
+                               result['pdf']['navigate_via'])
+            except Exception:
+                logger.exception("Failed to write success to DB for pdf")
     return result
 
 def scrape_modal_html_and_gather_pdf_links(
@@ -239,20 +249,18 @@ def find_submission_link_on_first_modal(page):
     except Exception:
         anchors = []
 
-    sr_link = None
+    sr_link_list = []
     for a in anchors:
         try:
             text = a.inner_text().strip()  # visible text (use text_content() for raw)
-            #logger.debug("anchor text: %s", text)
+            logger.debug("anchor text: %s", text)
             if text.startswith("* TSCA \u00A7 8(e) Submission"):
-                sr_link = a
+                sr_link_list.append(a)
                 logger.info("Found SR/8e link")
                 logger.debug(a.inner_html)
-                break
-
         except Exception:
             continue
-    return sr_link
+    return sr_link_list
 
 
 def navigate_to_initial_page(page, url):
@@ -264,6 +272,7 @@ def navigate_to_initial_page(page, url):
             nav_ok = True
             try:
                 page.wait_for_timeout(5000)
+                logger.info("Initial navigation succeeded on attempt %d", attempt)
             except Exception:
                 pass
             break
@@ -271,16 +280,38 @@ def navigate_to_initial_page(page, url):
             logger.warning("Navigation attempt %d failed (timeout=%dms): %s", attempt, to, e)
             try:
                 page.wait_for_timeout(500)
+                logger.info("Second navigation succeeded on attempt %d", attempt)
             except Exception:
                 logging.warning("Navigation attempt %d failed (timeout=%dms)", attempt, to)
                 pass
 
-        if not nav_ok:
-            logger.error("Navigation ultimately failed for URL, continuing to save whatever we have")
-            continue
-        else:
-            logger.info("Initial navigation succeeded on attemtp %d", attempt)
-    return page
+    if not nav_ok:
+        logger.error("Navigation ultimately failed for URL, processing should stop")
+
+    return nav_ok
+
+def generate_local_pdf_path(pdf_url: str, reports_dir: Path) -> Path:
+    """Generate the local file path for a given PDF URL."""
+    pdf_url_unescaped = html_lib.unescape(pdf_url or "")
+    parsed = urlparse(pdf_url_unescaped)
+    filename = ""
+    try:
+        qs = parse_qs(parsed.query)
+        if "filename" in qs and qs["filename"]:
+            filename = qs["filename"][0]
+    except Exception:
+        filename = ""
+
+    if not filename:
+        filename = Path(parsed.path).name if parsed.path else ""
+    filename = filename.replace("/", "_").strip()
+    if not filename:
+        filename = "unknown-substantialRisk.pdf"
+    if not filename.lower().endswith(".pdf"):
+        filename = filename + ".pdf"
+
+    return reports_dir / filename
+
 
 def download_pdfs(pdf_links: list[str], cas_dir: Path, session: Optional[requests.Session] = None) -> None:
     """Download PDFs reusing an HTTPS session/pool. If `session` is None, create and close one here."""
@@ -301,6 +332,13 @@ def download_pdfs(pdf_links: list[str], cas_dir: Path, session: Optional[request
     try:
         for pdf_url in pdf_links:
             try:
+                pdf_path = generate_local_pdf_path(pdf_url, reports_dir)
+
+                # Check if the file already exists
+                if pdf_path.exists():
+                    logger.debug("Skipping download, file already exists: %s", pdf_path)
+                    continue
+
                 pdf_url_unescaped = html_lib.unescape(pdf_url or "")
                 # Normalize proxy-relative URLs
                 if pdf_url_unescaped.startswith("proxy"):
@@ -310,27 +348,9 @@ def download_pdfs(pdf_links: list[str], cas_dir: Path, session: Optional[request
                 else:
                     pdf_url_full = pdf_url_unescaped
 
-                parsed = urlparse(pdf_url_unescaped)
-                filename = ""
-                try:
-                    qs = parse_qs(parsed.query)
-                    if "filename" in qs and qs["filename"]:
-                        filename = qs["filename"][0]
-                except Exception:
-                    filename = ""
-
-                if not filename:
-                    filename = Path(parsed.path).name if parsed.path else ""
-                filename = filename.replace("/", "_").strip()
-                if not filename:
-                    filename = "unknown-substantialRisk.pdf"
-                if not filename.lower().endswith(".pdf"):
-                    filename = filename + ".pdf"
-
-                logger.info("Downloading PDF from: %s -> %s", pdf_url_full, filename)
+                logger.info("Downloading PDF from: %s -> %s", pdf_url_full, pdf_path)
                 with s.get(pdf_url_full, timeout=30, stream=True) as resp:
                     if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("application/pdf"):
-                        pdf_path = reports_dir / filename
                         with open(pdf_path, "wb") as pf:
                             for chunk in resp.iter_content(chunk_size=8192):
                                 if chunk:
@@ -351,4 +371,3 @@ def download_pdfs(pdf_links: list[str], cas_dir: Path, session: Optional[request
                 s.close()
             except Exception:
                 pass
-

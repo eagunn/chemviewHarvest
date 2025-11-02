@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Config:
     #************ TEMP FOR TESTING *****************
-    input_file: str = "input_files/chemviewSubstRisksExport20251029.csv"
+    #input_file: str = "input_files/chemviewSubstRisksExport20251029.csv"
+    input_file: str = "input_files/srExportTest1.csv"
     archive_root: str = "chemview_archive_8e"
     #************ TEMP FOR TESTING *****************
     db_path: str = "chemview_harvest.db"
