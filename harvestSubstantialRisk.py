@@ -23,6 +23,7 @@ class Config:
     debug_out: str = "debug_artifacts"
 
     max_downloads: int = None  # if set, limit number of download attempts (not rows)
+    start_row: int = None  # if set, skip rows up to this row number
 
 # Initialize CONFIG with concrete type so static analyzers see its attributes
 CONFIG: Config = Config()
@@ -45,6 +46,7 @@ def initialize_config(argv):
     parser.add_argument("--debug-out", type=str, help="Debug artifacts directory")
     parser.add_argument("--archive-root", type=str, help="Archive root directory")
     parser.add_argument("--max-downloads", dest='max_downloads', type=int, help="Maximum number of download attempts to perform")
+    parser.add_argument("--start-row", type=int, help="Start processing from this row number (1-based index)")
     args = parser.parse_args(argv)
 
     global CONFIG
@@ -54,7 +56,8 @@ def initialize_config(argv):
         headless=args.headless if args.headless else Config.headless,
         debug_out=args.debug_out if args.debug_out is not None else Config.debug_out,
         archive_root=args.archive_root if args.archive_root is not None else Config.archive_root,
-        max_downloads=args.max_downloads if args.max_downloads is not None else Config.max_downloads
+        max_downloads=args.max_downloads if args.max_downloads is not None else Config.max_downloads,
+        start_row=args.start_row if args.start_row is not None else None
     )
     logging.info(f"Configuration initialized: {CONFIG}")
 

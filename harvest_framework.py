@@ -111,12 +111,18 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
             if not row or all(not (v and v.strip()) for v in row.values()):
                 continue
 
+            total_rows += 1
+
+            # Skip rows until the start_row is reached
+            if config.start_row is not None and total_rows < config.start_row:
+                logger.debug("Skipping row %d due to start_row=%d", total_rows, config.start_row)
+                continue
+
             # Stop if we've reached the configured number of actual download attempts
             if config.max_downloads is not None and download_calls >= config.max_downloads:
                 logger.info("Reached configured max_downloads=%s; stopping processing.", config.max_downloads)
                 break
 
-            total_rows += 1
             logger.debug("--- starting processing of row %d ---", total_rows)
             cas_val = (row.get(first_field) or '').strip() if first_field else ''
             url = (row.get(last_field) or '').strip()
