@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Config:
     #************ TEMP FOR TESTING *****************
-    input_file: str = "input_files/srExportTest.csv"
-    db_path: str = "chemview_test.db"
+    input_file: str = "input_files/chemviewSubstRisksExport20251029.csv"
     archive_root: str = "chemview_archive_8e"
     #************ TEMP FOR TESTING *****************
+    db_path: str = "chemview_harvest.db"
     headless: bool = False  # headless false means the browser will be displayed
     debug_out: str = "debug_artifacts"
 

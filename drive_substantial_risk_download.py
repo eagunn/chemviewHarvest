@@ -112,6 +112,11 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
     page = navigate_to_initial_page(page, url)
 
     sr_link = find_submission_link_on_first_modal(page)
+    if sr_link is None:
+        msg = "No Substantial Risk / 8e link found on initial page"
+        logger.error(msg)
+        # don't waste anymore time on this entry
+        return result
 
     page = click_anchor_link_and_wait_for_modal(page, sr_link)
 
