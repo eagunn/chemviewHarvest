@@ -244,7 +244,7 @@ def click_anchor_link_and_wait_for_modal(page, sr_link: Any | None):
 
 def find_submission_link_on_first_modal(page):
     try:
-        anchors = page.query_selector_all("a[href]")
+        anchors = page.query_selector_all('div#chemical-detail-modal-body a[href]')
         logger.debug("Found %d href anchors on page", len(anchors))
     except Exception:
         anchors = []
@@ -284,6 +284,7 @@ def navigate_to_initial_page(page, url):
             except Exception:
                 logging.warning("Navigation attempt %d failed (timeout=%dms)", attempt, to)
                 pass
+
 
     if not nav_ok:
         logger.error("Navigation ultimately failed for URL, processing should stop")
