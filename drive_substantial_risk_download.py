@@ -1,12 +1,9 @@
-import re
 import requests
 import html as html_lib
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import logging
 from typing import Dict, Any, Optional
-from file_types import FileTypes
-from HarvestDB import HarvestDB
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -127,12 +124,14 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
         # don't waste any more time on this entry
         return result
 
-    for sr_link in sr_link_list:
+    # Iterate with an explicit 1-based index so we can number modal HTML files when there are multiple links
+    for idx, sr_link in enumerate(sr_link_list, start=1):
         page = click_anchor_link_and_wait_for_modal(page, sr_link)
 
         pdf_link_list = None
-        if need_pdf:
-            pdf_link_list = scrape_modal_html_and_gather_pdf_links(page, need_html, need_pdf, cas_dir, cas_val, db, file_types, url, result)
+        if need_html or need_pdf:
+            # pass sr_link so the scraper can find the modal specifically opened by this link
+            pdf_link_list = scrape_modal_html_and_gather_pdf_links(page, need_html, need_pdf, cas_dir, cas_val, db, file_types, url, result, item_no=idx, sr_link=sr_link)
 
         if pdf_link_list:
             download_pdfs(pdf_link_list, cas_dir)
@@ -147,38 +146,125 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
     return result
 
 def scrape_modal_html_and_gather_pdf_links(
-    page, need_html: bool, need_pdf: bool, cas_dir: Path, cas_val, db, file_types: Any, url: str, result: Dict[str, Any]
+    page, need_html: bool, need_pdf: bool, cas_dir: Path, cas_val, db, file_types: Any, url: str, result: Dict[str, Any], item_no: int = 1, sr_link=None
 ) -> Any:
-    logger.info("Waiting for Substantial Risk Reports modal to appear...")
+    logger.info(f"Waiting for Substantial Risk Reports modal {item_no} to appear...")
     try:
-        page.wait_for_selector("div.modal-body.action", timeout=10000)
+        # Try to derive a reliable selector for the modal opened by this sr_link
+        modal_selector = None
+        modal_id = None
+        try:
+            if sr_link is not None:
+                # link may have data-target like '#modal_xxx' or a selector
+                target = (sr_link.get_attribute('data-target') or '')
+                if not target:
+                    # sometimes target is stored in 'data-target' or 'href'
+                    target = (sr_link.get_attribute('href') or '')
+                if target:
+                    # normalize '#id' or '/path#id' -> extract id
+                    if target.startswith('#'):
+                        modal_id = target.lstrip('#')
+                    else:
+                        # if href contains a hash, take the fragment
+                        if '#' in target:
+                            modal_id = target.split('#')[-1]
+                    if modal_id:
+                        # use attribute selector to be safe with special chars in id
+                        modal_selector = f'div[id="{modal_id}"] .modal-body.action'
+        except Exception:
+            modal_selector = None
+            modal_id = None
 
-        # Assume there is only one modal-body action div and it is the outermost one
-        found_modal = page.query_selector("div.modal-body.action")
+        # Wait for either the specific modal (if we have a selector) or for any modal to appear
+        try:
+            if modal_selector:
+                page.wait_for_selector(modal_selector, timeout=10000)
+            else:
+                page.wait_for_selector("div.modal-body.action", timeout=10000)
+        except Exception:
+            # if waiting for specific modal failed, fall back to any modal
+            try:
+                page.wait_for_selector("div.modal-body.action", timeout=5000)
+            except Exception:
+                logger.debug("No modal appeared within wait time")
+
+        # Prefer waiting specifically for PDF anchors inside the targeted modal so we capture populated content
+        try:
+            if modal_selector:
+                page.wait_for_selector(f"{modal_selector} li a.show_external_link", timeout=7000)
+            else:
+                page.wait_for_selector("div.modal-body.action li a.show_external_link", timeout=7000)
+        except Exception:
+            logger.debug("PDF anchors didn't appear within timeout; proceeding to capture modal HTML anyway")
+
+        # Now try to query the modal element we want
+        found_modal = None
+        if modal_selector:
+            try:
+                found_modal = page.query_selector(modal_selector)
+            except Exception:
+                found_modal = None
+
+        if found_modal is None:
+            # Try to find the visible/topmost modal (by visibility and/or z-index). If none visible, fall back to last modal.
+            modals = page.query_selector_all("div.modal-body.action")
+            candidate = None
+            max_z = -999999
+            for m in modals:
+                try:
+                    visible = m.evaluate("el => { const s = window.getComputedStyle(el); return !!(s && s.display !== 'none' && s.visibility !== 'hidden' && el.offsetHeight > 0); }")
+                except Exception:
+                    visible = False
+                try:
+                    z = m.evaluate("el => { const s = window.getComputedStyle(el); const z = parseInt(s.zIndex)||0; return isNaN(z)?0:z; }")
+                except Exception:
+                    z = 0
+                if visible and (candidate is None or z > max_z):
+                    candidate = m
+                    max_z = z
+            if candidate is not None:
+                found_modal = candidate
+            else:
+                if modals:
+                    found_modal = modals[-1]
+
         if found_modal:
+            # Diagnostic info: id (if any) and number of PDF anchors
+            modal_ident = None
+            try:
+                parent_div = found_modal.evaluate("el => el.closest('[id]') ? el.closest('[id]').id : null")
+                modal_ident = parent_div
+            except Exception:
+                modal_ident = modal_id
+            try:
+                anchors = found_modal.query_selector_all("li a.show_external_link")
+                anchor_count = len(anchors) if anchors is not None else 0
+            except Exception:
+                anchor_count = 0
+            logger.info("Capturing modal (id=%s) with %d pdf anchors", modal_ident, anchor_count)
+
+            # capture inner HTML after we've given the modal a chance to populate
             modal_html = found_modal.inner_html()
-            # ensure pdf_url is always defined for later checks
             pdf_link_list = []
             if need_html:
                 logger.info("Will attempt to save modal HTML")
                 modal_html_wrapped = f"<div class='modal-body action'>\n{modal_html}\n</div>"
-                html_path = cas_dir / "substantialRiskSubmissionReport.html"
+                html_path = cas_dir / f"substantialRiskSubmissionReport_{item_no}.html"
                 try:
                     with open(html_path, 'w', encoding='utf-8') as fh:
                         fh.write(modal_html_wrapped)
-                    logger.info("Saved modal HTML to %s", html_path)
+                    logger.info("Saved modal HTML %i to %s", item_no, html_path)
                     result['html']['success'] = True
                     result['html']['local_file_path'] = str(html_path)
-                    # we get to the html modal via the main URL
                     result['html']['navigate_via'] = url
                     try:
-                        db.log_success(cas_val, file_types.substantial_risk_html, str(html_path),
-                                       result['html']['navigate_via'])
+                        db.log_success(cas_val, file_types.substantial_risk_html, str(html_path), result['html']['navigate_via'])
                     except Exception:
                         logger.exception("Failed to write success to DB for html")
                 except Exception as e:
                     logger.exception("Failed to save modal HTML: %s", e)
                     result['html']['error'] = str(e)
+
             if need_pdf:
                 logger.info("Will attempt to find all PDF download links in the modal")
                 try:
@@ -186,7 +272,6 @@ def scrape_modal_html_and_gather_pdf_links(
                     for anchor in pdf_anchors:
                         href = anchor.get_attribute("href")
                         if href:
-                            # Fix the URL if it starts with 'proxy'
                             if href.startswith("proxy"):
                                 href = f"https://chemview.epa.gov/chemview/{href}"
                             pdf_link_list.append(href)
@@ -266,25 +351,36 @@ def find_submission_link_on_first_modal(page):
 def navigate_to_initial_page(page, url):
     nav_ok = False
     nav_timeouts = [30000, 60000, 90000]
+    selector = "div#chemical-detail-modal-body"
     for attempt, to in enumerate(nav_timeouts, start=1):
         try:
+            # Try to navigate to the page (DOM content loaded)
             page.goto(url, wait_until="domcontentloaded", timeout=to)
-            nav_ok = True
-            try:
-                page.wait_for_timeout(5000)
-                logger.info("Initial navigation succeeded on attempt %d", attempt)
-            except Exception:
-                pass
-            break
         except Exception as e:
             logger.warning("Navigation attempt %d failed (timeout=%dms): %s", attempt, to, e)
             try:
+                # Short wait before next attempt to avoid beating the server
                 page.wait_for_timeout(500)
-                logger.info("Second navigation succeeded on attempt %d", attempt)
             except Exception:
-                logging.warning("Navigation attempt %d failed (timeout=%dms)", attempt, to)
                 pass
+            # try the next timeout value
+            continue
 
+        # After a successful goto, wait for the modal to appear. Only when this wait
+        # succeeds do we consider navigation truly successful for our purposes.
+        try:
+            page.wait_for_selector(selector, timeout=10000)
+            nav_ok = True
+            logger.info("Initial navigation and modal presence succeeded on attempt %d", attempt)
+            break
+        except Exception as e:
+            logger.warning("Modal selector '%s' not found after navigation attempt %d: %s", selector, attempt, e)
+            try:
+                page.wait_for_timeout(500)
+            except Exception:
+                pass
+            # continue to next attempt
+            continue
 
     if not nav_ok:
         logger.error("Navigation ultimately failed for URL, processing should stop")
