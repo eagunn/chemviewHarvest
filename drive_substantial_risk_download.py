@@ -124,6 +124,31 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
         logger.debug("wait_for_sr_anchors raised an exception or timed out; proceeding to find anchors anyway")
 
     sr_link_list = find_submission_links_on_first_modal(page)
+
+    # Also look for summary/endpoint links (e.g. 'Acute toxicity') on the first modal
+    try:
+        summary_links = find_summary_links_on_first_modal(page)
+        if summary_links:
+            logger.info("Found %d summary/endpoint links on initial modal", len(summary_links))
+            for sidx, s_link in enumerate(summary_links, start=1):
+                try:
+                    text = (s_link.inner_text() or "").strip()
+                    fname = sanitize_filename(text or f"summary_{sidx}") + ".html"
+                    scrape_summary_modal_and_save(page, s_link, cas_dir, fname)
+                except Exception as e:
+                    # Non-fatal: warn and include debug-level stack trace
+                    logger.warning("Failed to scrape/save summary modal for link index %d: %s", sidx, e)
+                    logger.debug("Exception details for summary scrape failure", exc_info=True)
+        else:
+            # Many initial modals legitimately do not have summary links; debug-level is appropriate
+            logger.debug("No summary/endpoint links found on initial modal")
+    except Exception:
+        # Non-fatal: record a warning and keep the detailed stack at debug
+        import sys
+        e = sys.exc_info()[1]
+        logger.warning("Error while searching for or processing summary links on initial modal: %s", e)
+        logger.debug("Full exception while processing summary links", exc_info=True)
+
     if not sr_link_list:
         msg = "No Substantial Risk / 8e links found on initial page"
         logger.error(msg)
@@ -295,43 +320,20 @@ def scrape_modal_html_and_gather_pdf_links(
 
 
 def click_anchor_link_and_wait_for_modal(page, sr_link: Any | None):
-    # If we found the sr/8e link, then click it to open the summary modal.
-    # We always need to open the modal, even if we don't need to save
-    # its HTML, because we need to get a download link from it.
+    # For summary links, only use element_handle.click() to avoid double modal opening
     if sr_link:
         try:
-            onclick = (sr_link.get_attribute('onclick') or '') or ''
-            logger.debug("found onclick attribute in link")
-        except Exception:
-            logger.warning("Failed to find onclick attribute in link")
-            onclick = ''
+            sr_link.click()
+            logger.debug("Clicked anchor via element_handle.click() (summary link mode)")
+        except Exception as e:
+            logger.warning("Failed to click anchor via element_handle.click(): %s", e)
     else:
         logger.warning("No SR/8e link found on page")
-        onclick = ''
-
     try:
-        if 'childModalClick' in onclick or 'modalClick' in onclick:
-            logger.debug("Going to try modal click via evaluate")
-            try:
-                page.evaluate(
-                    "(el)=>{ try{ if(typeof childModalClick === 'function'){ childModalClick(new MouseEvent('click',{bubbles:true,cancelable:true}), el); return true; } if(typeof modalClick === 'function'){ modalClick(new MouseEvent('click',{bubbles:true,cancelable:true}), el); return true; } el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true})); return true;}catch(e){ try{ el.click(); }catch(e){} return false;} }",
-                    sr_link,
-                )
-                logger.debug("Clicked SR/8e element via childModalClick/modalClick evaluate")
-            except Exception:
-                logger.warning("Exception when trying to click SR/8e element via childModalClick/modalClick evaluate)")
-                pass
-        else:
-            logger.warning("Did not find expected click attributes in SR/8e link")
-
-        try:
-            page.wait_for_timeout(2000)
-        except Exception:
-            logger.warning("Exception when trying to wait for page to load")
-            pass
-    except Exception as e:
-        logger.error("Failed to click global SR/8e element: %s", e)
-
+        page.wait_for_timeout(2000)
+    except Exception:
+        logger.debug("Exception when trying to wait for page to load after click")
+        pass
     return page
 
 
@@ -510,3 +512,110 @@ def download_pdfs(pdf_links: list[str], cas_dir: Path, session: Optional[request
                 s.close()
             except Exception:
                 pass
+
+def find_summary_links_on_first_modal(page):
+    """Find links like 'viewAllEndpoint-...' inside the first chemical detail modal.
+    Returns a list of element handles (may be empty).
+    """
+    try:
+        # Prefer anchors with ids that start with viewAllEndpoint-
+        anchors = page.query_selector_all('div#chemical-detail-modal-body a[id^="viewAllEndpoint-"]')
+        if anchors:
+            logger.debug("Found %d summary anchors by id prefix", len(anchors))
+            return anchors
+    except Exception:
+        pass
+
+    # Fallback: search for anchors with a visible text that looks like an endpoint name
+    try:
+        anchors = page.query_selector_all('div#chemical-detail-modal-body a[href="#"], div#chemical-detail-modal-body a[onclick]')
+        summary_anchors = []
+        for a in anchors:
+            try:
+                text = (a.inner_text() or "").strip()
+                # crude heuristic: endpoint links often contain a space and a number in parentheses
+                if text and '(' in text and text.split('(')[0].strip():
+                    summary_anchors.append(a)
+            except Exception:
+                continue
+        logger.debug("Found %d summary anchors by heuristic", len(summary_anchors))
+        return summary_anchors
+    except Exception:
+        return []
+
+def sanitize_filename(text: str) -> str:
+    """Sanitize anchor text into a filesystem-safe, short filename (lowercase, underscores)."""
+    import re
+
+    name = text.strip().lower()
+    # Remove parentheses contents first
+    name = re.sub(r"\([^)]*\)", "", name)
+    # replace non-alphanumeric with underscores
+    name = re.sub(r"[^a-z0-9]+", "_", name)
+    name = name.strip("_")
+    if not name:
+        name = "summary"
+    return name[:100]
+
+
+def scrape_summary_modal_and_save(page, anchor, cas_dir: Path, filename: str):
+    """Click the given anchor to open the summary overlay/modal, wait for #viewAllEndpointBody to be visible and populated,
+    capture the modal innerHTML, and save to cas_dir/filename.
+    Only use element_handle.click() for summary links to avoid double modal opening.
+    """
+    import datetime
+    try:
+        # Click the anchor using only element_handle.click() to avoid double modal opening
+        try:
+            anchor.click()
+            logger.debug("Clicked summary anchor via element_handle.click()")
+        except Exception as e:
+            logger.warning("Failed to click summary anchor via element_handle.click(): %s", e)
+            return False
+
+        # Wait for #viewAllEndpointBody to be visible and populated
+        try:
+            page.wait_for_selector('#viewAllEndpointBody', timeout=8000, state='visible')
+            # Optionally, wait for a table or heading inside the modal to appear
+            page.wait_for_function(
+                "() => { const el = document.getElementById('viewAllEndpointBody'); return el && el.offsetParent !== null && el.innerText.trim().length > 0; }",
+                timeout=4000
+            )
+            logger.debug("Summary modal #viewAllEndpointBody is visible and populated")
+        except Exception:
+            logger.debug("Summary modal #viewAllEndpointBody did not appear or populate within timeout; attempting to capture anyway")
+
+        # Capture the modal HTML
+        try:
+            modal = page.query_selector('#viewAllEndpointBody')
+            if not modal:
+                logger.error("No #viewAllEndpointBody found to capture for filename %s", filename)
+                return False
+            modal_html = modal.inner_html()
+        except Exception as e:
+            logger.error("Failed to get inner_html of #viewAllEndpointBody: %s", e)
+            return False
+
+        # Ensure reports dir exists
+        cas_dir.mkdir(parents=True, exist_ok=True)
+        out_path = cas_dir / filename
+        try:
+            with open(out_path, 'w', encoding='utf-8') as fh:
+                fh.write(f"<div id='viewAllEndpointBody'>\n{modal_html}\n</div>")
+            logger.info("Saved summary modal HTML to %s", out_path)
+        except Exception as e:
+            logger.error("Failed to write summary HTML to %s: %s", out_path, e)
+            return False
+
+        # Attempt to close the summary modal (click .close button if present, or hide modal)
+        try:
+            closed = page.evaluate("() => { const el = document.getElementById('viewAllEndpointBody'); if(!el) return false; const modal = el.closest('.modal'); if(!modal) return false; const btn = modal.querySelector('.close'); if(btn){ btn.click(); return true;} modal.style.display='none'; return true; }")
+            logger.debug("Attempted to close summary modal (result=%s)", closed)
+        except Exception:
+            logger.exception("Failed to close summary modal after saving HTML")
+
+        return True
+    except Exception as e:
+        logger.exception("Error scraping summary modal: %s", e)
+        return False
+
