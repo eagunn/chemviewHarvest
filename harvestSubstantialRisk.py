@@ -14,16 +14,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    #************ TEMP FOR TESTING *****************
-    #input_file: str = "input_files/chemviewSubstRisksExport20251029.csv"
-    input_file: str = "input_files/srExportTest1.csv"
-    archive_root: str = "chemview_archive_8e"
-    #************ TEMP FOR TESTING *****************
+    input_file: str = "input_files/chemviewSubstRisksExport20251029.csv"
+    archive_root: str = "chemview_archive"
     db_path: str = "chemview_harvest.db"
     headless: bool = False  # headless false means the browser will be displayed
     debug_out: str = "debug_artifacts"
-
-    max_downloads: int = None  # if set, limit number of download attempts (not rows)
+    max_downloads: int = None  # if set, limit number of downloads made (not rows)
     start_row: int = None  # if set, skip rows up to this row number
 
 # Initialize CONFIG with concrete type so static analyzers see its attributes
@@ -73,7 +69,7 @@ def main(argv=None):
     """
     initialize_config(argv)
     # Configure centralized logging for the process
-    initialize_logging(log_path="./harvestSubstantialRisk.log", level=logging.DEBUG)
+    initialize_logging(log_path="./harvestSubstantialRisk.log", level=logging.INFO)
 
     logger.info("Starting Substantial Risk harvest via framework")
 
