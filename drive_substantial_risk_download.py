@@ -3,6 +3,7 @@ import html as html_lib
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import logging
+import time
 from typing import Dict, Any, Optional
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -115,7 +116,14 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
         # don't waste any more time on this entry
         return result
 
-    sr_link_list = find_submission_link_on_first_modal(page)
+    # Wait for SR anchors inside the initial modal to have non-empty text
+    # (anchors may be added to the DOM quickly but populated asynchronously).
+    try:
+        wait_for_sr_anchors(page, modal_selector="#chemical-detail-modal-body", timeout_ms=8000, poll_interval_s=0.25)
+    except Exception:
+        logger.debug("wait_for_sr_anchors raised an exception or timed out; proceeding to find anchors anyway")
+
+    sr_link_list = find_submission_links_on_first_modal(page)
     if not sr_link_list:
         msg = "No Substantial Risk / 8e links found on initial page"
         logger.error(msg)
@@ -327,7 +335,7 @@ def click_anchor_link_and_wait_for_modal(page, sr_link: Any | None):
     return page
 
 
-def find_submission_link_on_first_modal(page):
+def find_submission_links_on_first_modal(page):
     try:
         anchors = page.query_selector_all('div#chemical-detail-modal-body a[href]')
         logger.debug("Found %d href anchors on page", len(anchors))
@@ -386,6 +394,40 @@ def navigate_to_initial_page(page, url):
         logger.error("Navigation ultimately failed for URL, processing should stop")
 
     return nav_ok
+
+def wait_for_sr_anchors(page, modal_selector: str = '#chemical-detail-modal-body', timeout_ms: int = 7000, poll_interval_s: float = 0.25):
+    """
+    Wait until at least one anchor inside `modal_selector li a.show_external_link`
+    has non-empty text. Returns the list of anchors (may be empty on timeout).
+    """
+    sel = f"{modal_selector} li a.show_external_link"
+    js = (
+        "(sel) => {"
+        " const anchors = Array.from(document.querySelectorAll(sel));"
+        " return anchors.some(a => a.textContent && a.textContent.trim().length > 0);"
+        "}"
+    )
+    try:
+        page.wait_for_function(js, sel, timeout=timeout_ms)
+    except Exception:
+        # fallback: poll until timeout
+        end = time.time() + (timeout_ms / 1000.0)
+        while time.time() < end:
+            anchors = page.query_selector_all(sel)
+            for a in anchors:
+                try:
+                    if a.inner_text() and a.inner_text().strip():
+                        return anchors
+                except Exception:
+                    continue
+            try:
+                time.sleep(poll_interval_s)
+            except Exception:
+                break
+        return page.query_selector_all(sel)
+
+    # primary path: the function returned successfully; return matching anchors
+    return page.query_selector_all(sel)
 
 def generate_local_pdf_path(pdf_url: str, reports_dir: Path) -> Path:
     """Generate the local file path for a given PDF URL."""
