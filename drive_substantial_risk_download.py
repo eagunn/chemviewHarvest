@@ -125,29 +125,35 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
 
     sr_link_list = find_submission_links_on_first_modal(page)
 
-    # Also look for summary/endpoint links (e.g. 'Acute toxicity') on the first modal
-    try:
-        summary_links = find_summary_links_on_first_modal(page)
-        if summary_links:
-            logger.info("Found %d summary/endpoint links on initial modal", len(summary_links))
-            for sidx, s_link in enumerate(summary_links, start=1):
-                try:
-                    text = (s_link.inner_text() or "").strip()
-                    fname = sanitize_filename(text or f"summary_{sidx}") + ".html"
-                    scrape_summary_modal_and_save(page, s_link, cas_dir, fname)
-                except Exception as e:
-                    # Non-fatal: warn and include debug-level stack trace
-                    logger.warning("Failed to scrape/save summary modal for link index %d: %s", sidx, e)
-                    logger.debug("Exception details for summary scrape failure", exc_info=True)
-        else:
-            # Many initial modals legitimately do not have summary links; debug-level is appropriate
-            logger.debug("No summary/endpoint links found on initial modal")
-    except Exception:
-        # Non-fatal: record a warning and keep the detailed stack at debug
-        import sys
-        e = sys.exc_info()[1]
-        logger.warning("Error while searching for or processing summary links on initial modal: %s", e)
-        logger.debug("Full exception while processing summary links", exc_info=True)
+    ##################################################################
+    # Disabled: This code seems to work ok when there ARE summary links,
+    # but fails with timeouts and ghost html files when there are none.
+    # Since "none" seems to be the more common case and the summary html
+    # simply pulls together info available in the other htmls files, I'm
+    # disabling this section for now to improve overall reliability.
+    # # Also look for summary/endpoint links (e.g. 'Acute toxicity') on the first modal
+    # try:
+    #     summary_links = find_summary_links_on_first_modal(page)
+    #     if summary_links:
+    #         logger.info("Found %d summary/endpoint links on initial modal", len(summary_links))
+    #         for sidx, s_link in enumerate(summary_links, start=1):
+    #             try:
+    #                 text = (s_link.inner_text() or "").strip()
+    #                 fname = sanitize_filename(text or f"summary_{sidx}") + ".html"
+    #                 scrape_summary_modal_and_save(page, s_link, cas_dir, fname)
+    #             except Exception as e:
+    #                 # Non-fatal: warn and include debug-level stack trace
+    #                 logger.warning("Failed to scrape/save summary modal for link index %d: %s", sidx, e)
+    #                 logger.debug("Exception details for summary scrape failure", exc_info=True)
+    #     else:
+    #         # Many initial modals legitimately do not have summary links; debug-level is appropriate
+    #         logger.debug("No summary/endpoint links found on initial modal")
+    # except Exception:
+    #     # Non-fatal: record a warning and keep the detailed stack at debug
+    #     import sys
+    #     e = sys.exc_info()[1]
+    #     logger.warning("Error while searching for or processing summary links on initial modal: %s", e)
+    #     logger.debug("Full exception while processing summary links", exc_info=True)
 
     if not sr_link_list:
         msg = "No Substantial Risk / 8e links found on initial page"
@@ -274,19 +280,25 @@ def scrape_modal_html_and_gather_pdf_links(
                 anchor_count = len(anchors) if anchors is not None else 0
             except Exception:
                 anchor_count = 0
-            logger.info("Capturing modal (id=%s) with %d pdf anchors", modal_ident, anchor_count)
+            logger.info("Capturing modal (text=%s) with %d pdf anchors", modal_ident, anchor_count)
 
-            # capture inner HTML after we've given the modal a chance to populate
+            # Extract identifier from modal_ident (e.g., 8EHQ-00-14711)
+            extracted_id = "unknown"
+            if modal_ident and "[" in modal_ident and "]" in modal_ident:
+                extracted_id = modal_ident.split("[")[1].split("]")[0]
+                logger.debug("Extracted identifier from modal id: %s", extracted_id)
+
+            # Capture inner HTML after we've given the modal a chance to populate
             modal_html = found_modal.inner_html()
             pdf_link_list = []
             if need_html:
                 logger.info("Will attempt to save modal HTML")
                 modal_html_wrapped = f"<div class='modal-body action'>\n{modal_html}\n</div>"
-                html_path = cas_dir / f"substantialRiskSubmissionReport_{item_no}.html"
+                html_path = cas_dir / f"sr_{extracted_id}.html"
                 try:
                     with open(html_path, 'w', encoding='utf-8') as fh:
                         fh.write(modal_html_wrapped)
-                    logger.info("Saved modal HTML %i to %s", item_no, html_path)
+                    logger.info("Saved modal HTML with identifier %s to %s", extracted_id, html_path)
                     result['html']['success'] = True
                     result['html']['local_file_path'] = str(html_path)
                     result['html']['navigate_via'] = url
@@ -323,7 +335,7 @@ def click_anchor_link_and_wait_for_modal(page, sr_link: Any | None):
     # For summary links, only use element_handle.click() to avoid double modal opening
     if sr_link:
         try:
-            sr_link.click()
+            sr_link.click(timeout=30000)
             logger.debug("Clicked anchor via element_handle.click() (summary link mode)")
         except Exception as e:
             logger.warning("Failed to click anchor via element_handle.click(): %s", e)
