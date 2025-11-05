@@ -7,8 +7,19 @@ import time
 from typing import Dict, Any, Optional
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import json
+from datetime import datetime
+import atexit
 
 logger = logging.getLogger(__name__)
+
+# Module-level accumulator for download plans so we can write one JSON per N CAS entries
+PDF_PLAN_ACCUM: Dict[str, Any] = {'folder': 'chemview_archive_8e', 'subfolderList': [], 'downloadList': []}
+PDF_PLAN_ACCUM_CAS_SET: set = set()
+PDF_PLAN_ACCUM_CAS_SINCE_WRITE: int = 0
+PDF_PLAN_WRITE_BATCH_SIZE: int = 25
+PDF_PLAN_OUT_DIR: Path = Path('pdfDownloadsToDo')
+PDF_PLAN_OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _need_download_from_db(db, cas_val: str, file_type: str) -> bool:
@@ -33,6 +44,67 @@ def _need_download_from_db(db, cas_val: str, file_type: str) -> bool:
         return False
     else:
         return True
+
+
+# --- helpers for building and saving a per-run JSON download plan ---
+
+def _ensure_cas_entry(plan: Dict[str, Any], cas_folder_name: str) -> Dict[str, Any]:
+    """Return or create a cas entry dict inside plan['subfolderList']."""
+    for entry in plan.get('subfolderList', []):
+        if entry.get('folder') == cas_folder_name:
+            return entry
+    new_entry = {'folder': cas_folder_name, 'subfolderList': [], 'downloadList': []}
+    plan.setdefault('subfolderList', []).append(new_entry)
+    return new_entry
+
+
+def _ensure_reports_subfolder(cas_entry: Dict[str, Any], reports_name: str = 'substantialRiskReports') -> Dict[str, Any]:
+    """Return or create the reports subfolder dict inside a cas_entry."""
+    for sf in cas_entry.get('subfolderList', []):
+        if sf.get('folder') == reports_name:
+            return sf
+    new_sf = {'folder': reports_name, 'subfolderList': [], 'downloadList': []}
+    cas_entry.setdefault('subfolderList', []).append(new_sf)
+    return new_sf
+
+
+def add_pdf_links_to_plan(plan: Dict[str, Any], cas_dir: Path, pdf_links: list[str]):
+    """Add pdf_links to the nested plan structure under the cas_dir name and substantialRiskReports subfolder.
+    Duplicate URLs are ignored.
+    """
+    if not pdf_links:
+        return
+    cas_folder_name = cas_dir.name
+    cas_entry = _ensure_cas_entry(plan, cas_folder_name)
+    reports_sf = _ensure_reports_subfolder(cas_entry)
+    existing = set(reports_sf.get('downloadList', []))
+    attempted = len(pdf_links)
+    added = 0
+    skipped_duplicates = 0
+    for url in pdf_links:
+        if not url:
+            continue
+        if url in existing:
+            skipped_duplicates += 1
+            continue
+        reports_sf.setdefault('downloadList', []).append(url)
+        existing.add(url)
+        added += 1
+
+
+
+def save_download_plan(plan: Dict[str, Any], debug_out: Path) -> Path:
+    """Write the plan to a timestamped JSON file in debug_out and return the path."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"pdfDownloads_{ts}.json"
+    out_path = Path(debug_out) / filename
+    try:
+        with open(out_path, 'w', encoding='utf-8') as fh:
+            json.dump(plan, fh, indent=2)
+        logger.info("Saved PDF download plan to %s", out_path)
+    except Exception as e:
+        logger.exception("Failed to save pdf download plan to %s: %s", out_path, e)
+    return out_path
 
 
 def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, file_types: Any = None) -> Dict[str, Any]:
@@ -173,7 +245,8 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
             pdf_link_list = scrape_modal_html_and_gather_pdf_links(page, need_html, need_pdf, cas_dir, cas_val, db, file_types, url, result, item_no=idx, sr_link=sr_link)
 
         if pdf_link_list:
-            download_pdfs(pdf_link_list, cas_dir)
+            # Add discovered PDF links to the global accumulator (will be flushed to disk in batches)
+            _accumulate_pdf_links_for_cas(cas_dir, pdf_link_list)
             result['pdf']['success'] = True
             result['pdf']['local_file_path'] = str(cas_dir / "substantialRiskReports")
             result['pdf']['navigate_via'] = url
@@ -182,6 +255,9 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
                                result['pdf']['navigate_via'])
             except Exception:
                 logger.exception("Failed to write success to DB for pdf")
+
+    # Note: download plan is accumulated and flushed by the module-level accumulator; no per-CAS save here.
+
     return result
 
 def scrape_modal_html_and_gather_pdf_links(
@@ -575,7 +651,7 @@ def scrape_summary_modal_and_save(page, anchor, cas_dir: Path, filename: str):
     capture the modal innerHTML, and save to cas_dir/filename.
     Only use element_handle.click() for summary links to avoid double modal opening.
     """
-    import datetime
+    # (no extra imports needed here)
     try:
         # Click the anchor using only element_handle.click() to avoid double modal opening
         try:
@@ -631,3 +707,46 @@ def scrape_summary_modal_and_save(page, anchor, cas_dir: Path, filename: str):
         logger.exception("Error scraping summary modal: %s", e)
         return False
 
+def _flush_pdf_plan_accum(force: bool = False):
+    """Write the accumulated PDF plan to a timestamped JSON file in `pdfDownloadsToDo` and reset the accumulator.
+    If `force` is False, will only write if there is at least one CAS entry accumulated.
+    """
+    global PDF_PLAN_ACCUM, PDF_PLAN_ACCUM_CAS_SET, PDF_PLAN_ACCUM_CAS_SINCE_WRITE
+    if not PDF_PLAN_ACCUM.get('subfolderList'):
+        return None
+    # Ensure output folder exists
+    PDF_PLAN_OUT_DIR.mkdir(parents=True, exist_ok=True)
+    # Use save_download_plan to write the file
+    try:
+        path = save_download_plan(PDF_PLAN_ACCUM, PDF_PLAN_OUT_DIR)
+        logger.info("Flushed accumulated PDF plan to %s (cas_count=%d)", path, len(PDF_PLAN_ACCUM_CAS_SET))
+    except Exception:
+        logger.exception("Failed to flush accumulated PDF plan")
+        return None
+    # Reset accumulator
+    PDF_PLAN_ACCUM = {'folder': 'chemview_archive_8e', 'subfolderList': [], 'downloadList': []}
+    PDF_PLAN_ACCUM_CAS_SET.clear()
+    PDF_PLAN_ACCUM_CAS_SINCE_WRITE = 0
+    return path
+
+
+def _accumulate_pdf_links_for_cas(cas_dir: Path, pdf_links: list[str]):
+    """Add pdf_links to the module-level accumulator and flush to disk every PDF_PLAN_WRITE_BATCH_SIZE unique CAS entries."""
+    global PDF_PLAN_ACCUM, PDF_PLAN_ACCUM_CAS_SET, PDF_PLAN_ACCUM_CAS_SINCE_WRITE
+    if not pdf_links:
+        return
+    cas_folder_name = cas_dir.name
+    # Determine if this is a new CAS entry for the current accumulator
+    is_new_cas = cas_folder_name not in PDF_PLAN_ACCUM_CAS_SET
+    # Add links into the accumulator
+    add_pdf_links_to_plan(PDF_PLAN_ACCUM, cas_dir, pdf_links)
+    if is_new_cas:
+        PDF_PLAN_ACCUM_CAS_SET.add(cas_folder_name)
+        PDF_PLAN_ACCUM_CAS_SINCE_WRITE += 1
+    # Flush if we've reached the batch size
+    if PDF_PLAN_ACCUM_CAS_SINCE_WRITE >= PDF_PLAN_WRITE_BATCH_SIZE:
+        _flush_pdf_plan_accum()
+
+
+# Register an atexit handler so remaining accumulated plans are flushed when the process exits normally
+atexit.register(lambda: _flush_pdf_plan_accum(force=True))
