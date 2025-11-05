@@ -1,13 +1,15 @@
-# This code has been tested against the downloadDict.json files from multiple parsePage
-# scripts.
+# This code diverges somewhat from the version I've used in multiple projects.
+# For example, it handles a %2F encoding found in the PDF links.
+# And I've converted to using official logging instead of print statements.
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup
 import json
 import os
 import requests
 import time
 import urllib.parse
 import logging
+import re
 
 # module-level logger
 logger = logging.getLogger(__name__)
@@ -51,8 +53,8 @@ def extract_filename_from_url(downloadURL: str) -> str:
     safe = ''.join(safe_chars).strip()
     if not safe:
         safe = 'unknown_download'
-    # Replace percent signs with underscores to avoid percent characters in local filenames
-    safe = safe.replace('%', '_')
+    # Replace any %2F (case-insensitive) sequence with an underscore so '8e%2Ffoo' -> '8e_foo'
+    safe = re.sub(r'(?i)%2f', '_', safe)
     return safe
 
 
@@ -103,6 +105,7 @@ def savePage(pageToSave):
         logger.info("skipping %s already exists", pageToSave["filename"])
     else:
         pageSoup = None
+        response = None
         try:
             response = requests.get(pageToSave["url"])
             response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
@@ -115,9 +118,16 @@ def savePage(pageToSave):
             logger.exception("***An error occurred: %s", e)
 
         if pageSoup is not None:
-            with open(pageToSave["filename"], "w", encoding="utf-8") as file:
-                file.write(response.text)
+            try:
+                with open(pageToSave["filename"], "w", encoding="utf-8") as file:
+                    # Prefer to write the raw response text if available, otherwise fall back to the parsed HTML
+                    if response is not None:
+                        file.write(response.text)
+                    else:
+                        file.write(pageSoup.prettify())
                 logger.info("current page saved to: %s", pageToSave["filename"])
+            except Exception as e:
+                logger.exception("Failed to write page to %s: %s", pageToSave["filename"], e)
 
 
 # Lordy, lordy a legitimate use for recursion!
