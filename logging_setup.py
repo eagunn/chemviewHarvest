@@ -23,8 +23,8 @@ def initialize_logging(level=logging.INFO, log_path: str = DEFAULT_LOG_PATH, con
 
     formatter = logging.Formatter(FORMAT, datefmt=DATEFMT)
 
-    # File handler (rolling logs with max size 100 MB and 10 backups)
-    file_handler = RotatingFileHandler(log_path, maxBytes=100 * 1024 * 1024, backupCount=10, encoding='utf-8')
+    # File handler (rolling logs with max size 10 MB and 10 backups)
+    file_handler = RotatingFileHandler(log_path, maxBytes=10 * 1024 * 1024, backupCount=10, encoding='utf-8')
     file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
     root.addHandler(file_handler)
