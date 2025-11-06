@@ -114,6 +114,26 @@ class HarvestDB:
         params = (chemical_id, file_type, now, navigate_via)
         return self._execute_query(sql, params) is not None
 
+    def delete_success_records(self, chemical_id: str) -> bool:
+        """
+        Deletes all success records for the given chemical_id from the database.
+        """
+        sql = f"""
+        DELETE FROM {TABLE_NAME}
+        WHERE chemical_id = ? AND last_success_datetime IS NOT NULL;
+        """
+        try:
+            result = self._execute_query(sql, (chemical_id,))
+            if result:
+                logger.info("Deleted success records for chemical_id: %s", chemical_id)
+                return True
+            else:
+                logger.warning("No success records found for chemical_id: %s", chemical_id)
+                return False
+        except Exception as e:
+            logger.error("Error deleting success records for chemical_id %s: %s", chemical_id, e, exc_info=True)
+            return False
+
 
 # --- Example Usage (Demonstration) ---
 if __name__ == "__main__":
@@ -143,3 +163,8 @@ if __name__ == "__main__":
     status = db.get_harvest_status(test_id, test_file_type)
     # The important part: last_success_datetime and local_filepath should remain populated.
     logger.info("Status after subsequent failure: %s", status)
+
+    logger.info("--- 5. Delete Success Records ---")
+    db.delete_success_records(test_id)
+    status = db.get_harvest_status(test_id, test_file_type)
+    logger.info("Status after deleting success records: %s", status)

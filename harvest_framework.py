@@ -159,7 +159,7 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
             if attempted:
                 total_download_time += elapsed
                 download_calls += 1
-                logger.info("Download elapsed for cas=%s: %.3f seconds", cas_val, elapsed)
+                logger.info("Processing time elapsed for cas=%s: %.3f seconds", cas_val, elapsed)
 
             # Aggregate success counts based on driver's reported results
             html_result = (result.get('html') if result else {}) or {}
