@@ -20,6 +20,8 @@ debug_artifacts/
 input_files/
 chemview_archive*/
 pdfDownloadsToDo/
+harvest.go
+harvest.stop
 
 # database files don't go in the repo for now
 *.db
