@@ -1,0 +1,38 @@
+{
+  "folder": "chemview_archive_8e",
+  "subfolderList": [
+    {
+      "folder": "CAS-100-01-06",
+      "subfolderList": [
+        {
+          "folder": "substantialRiskReports",
+          "subfolderList": [],
+          "downloadList": [
+            "https://chemview.epa.gov/chemview/proxy?filename=8e%2F88920010280_95749_C5139FC6C2730E228525707D00625EDC.pdf",
+            "https://chemview.epa.gov/chemview/proxy?filename=8e%2F88920010280_Unknown_CE26DB44E1FC84BC85256930004F190A.pdf",
+            "https://chemview.epa.gov/chemview/proxy?filename=8e%2F88920010280_90153_FDFEB13E9EA013D08525707D00625E9C.pdf",
+            "https://chemview.epa.gov/chemview/proxy?filename=8e%2F88920010280_90040_3FDECCE33A1351FE8525707D00625E4C.pdf"
+          ]
+        }
+      ],
+      "downloadList": []
+    },
+    {
+      "folder": "CAS-100-42-5",
+      "subfolderList": [
+        {
+          "folder": "substantialRiskReports",
+          "subfolderList": [],
+          "downloadList": [
+            "https://chemview.epa.gov/chemview/proxy?filename=8e%2F88920010280_95749_C5139FC6C2730E228525707D00625EDC.pdf",
+            "https://chemview.epa.gov/chemview/proxy?filename=8e%2F88920010280_Unknown_CE26DB44E1FC84BC85256930004F190A.pdf",
+            "https://chemview.epa.gov/chemview/proxy?filename=8e%2F88920010280_90153_FDFEB13E9EA013D08525707D00625E9C.pdf",
+            "https://chemview.epa.gov/chemview/proxy?filename=8e%2F88920010280_90040_3FDECCE33A1351FE8525707D00625E4C.pdf"
+          ]
+        }
+      ],
+      "downloadList": []
+    }
+  ],
+  "downloadList": []
+}
