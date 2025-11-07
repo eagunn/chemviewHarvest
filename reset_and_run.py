@@ -20,8 +20,9 @@ def run_harvest_script():
             './harvestSubstantialRisk.py',
             '--headless',
             '--input-file', './input_files/srExportTest1.csv',
-            '--max-downloads', '1'
+            '--max-downloads', '3'
         ]
+        print("About to execute command:", ' '.join(command))
         subprocess.run(command, check=True)
         print("harvestSubstantialRisk.py executed successfully.")
     except subprocess.CalledProcessError as e:
