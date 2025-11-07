@@ -286,15 +286,37 @@ def scrape_modal_html_and_gather_pdf_links(
         modal_ident_safe = re.sub(r"[^A-Za-z0-9\-_]", "_", modal_ident)
         logger.info("Processing modal with id: %s (sanitized: %s)", modal_ident_raw, modal_ident_safe)
 
-        # Capture modal HTML
-        modal_html = modal.inner_html()
+        # Capture the modal-body.action div (outer HTML) if present; otherwise fall back to modal.inner_html()
+        modal_body_html = None
+        try:
+            body_locator = modal.locator("div.modal-body.action").first
+            # Ensure it exists and grab outerHTML
+            if body_locator and body_locator.count() > 0:
+                logger.debug("Found expected body locator inside modal")
+                try:
+                    modal_body_html = body_locator.evaluate("el => el.outerHTML")
+                except Exception:
+                    # fallback to inner_html wrapped
+                    inner = body_locator.inner_html()
+                    modal_body_html = f"<div class='modal-body action'>\n{inner}\n</div>"
+        except Exception:
+            modal_body_html = None
+
+        if modal_body_html is None:
+            # final fallback: capture the modal's inner HTML and wrap it
+            logger.warning("Did not find expected body locator; falling back to modal inner_html()")
+            try:
+                modal_html = modal.inner_html()
+                modal_body_html = f"<div class='modal-body action'>\n{modal_html}\n</div>"
+            except Exception:
+                modal_body_html = ""
+
         pdf_link_list = []
         if need_html:
             logger.info("Saving modal HTML")
-            modal_html_wrapped = f"<div class='modal-body action'>\n{modal_html}\n</div>"
             html_path = cas_dir / f"sr_{modal_ident_safe}.html"
             with open(html_path, 'w', encoding='utf-8') as fh:
-                fh.write(modal_html_wrapped)
+                fh.write(modal_body_html)
             logger.info("Saved modal HTML to %s", html_path)
             result['html']['success'] = True
             result['html']['local_file_path'] = str(html_path)
