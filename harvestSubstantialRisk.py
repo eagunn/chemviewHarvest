@@ -14,14 +14,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    #input_file: str = "input_files/chemviewSubstRisksExport20251029.csv"
-    input_file: str = "input_files/srExportTest1.csv"
+    input_file: str = "input_files/chemviewSubstRisksExport20251029.csv"
+    #input_file: str = "input_files/srExportTest1.csv"
     archive_root: str = "chemview_archive_8e"
     db_path: str = "chemview_harvest.db"
     headless: bool = False  # headless false means the browser will be displayed
     debug_out: str = "debug_artifacts"
     max_downloads: int = None  # if set, limit number of downloads made (not rows)
     start_row: int = None  # if set, skip rows up to this row number
+    stop_file: str = "harvest.stop"  # optional stop-file; when present the harvest stops gracefully
 
 # Initialize CONFIG with concrete type so static analyzers see its attributes
 CONFIG: Config = Config()
@@ -45,6 +46,7 @@ def initialize_config(argv):
     parser.add_argument("--archive-root", type=str, help="Archive root directory")
     parser.add_argument("--max-downloads", dest='max_downloads', type=int, help="Maximum number of download attempts to perform")
     parser.add_argument("--start-row", type=int, help="Start processing from this row number (1-based index)")
+    parser.add_argument("--stop-file", dest='stop_file', type=str, help="Path to stop file (when present, harvest stops)")
     args = parser.parse_args(argv)
 
     global CONFIG
@@ -55,7 +57,8 @@ def initialize_config(argv):
         debug_out=args.debug_out if args.debug_out is not None else Config.debug_out,
         archive_root=args.archive_root if args.archive_root is not None else Config.archive_root,
         max_downloads=args.max_downloads if args.max_downloads is not None else Config.max_downloads,
-        start_row=args.start_row if args.start_row is not None else None
+        start_row=args.start_row if args.start_row is not None else None,
+        stop_file=args.stop_file if args.stop_file is not None else Config.stop_file,
     )
     logging.info(f"Configuration initialized: {CONFIG}")
 

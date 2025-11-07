@@ -96,6 +96,13 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
         logger.error("Error: CSV header could not be read. Exiting with error code 2.")
         return 2
 
+    # Determine stop-file path (default 'harvest.stop' in CWD, can be overridden by config.stop_file)
+    stop_file_name = getattr(config, "stop_file", "harvest.stop")
+    stop_path = Path(stop_file_name)
+    if not stop_path.is_absolute():
+        stop_path = Path.cwd() / stop_path
+    logger.info("Will watch for stop file: %s", stop_path)
+
     logger.debug("Chemview CSV file opened and we have header fields")
     total_rows = 0
     html_success_count = 0
@@ -108,6 +115,14 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
         first_field = header_fields[0]
         last_field = header_fields[-1]
         for row in reader:
+            # Check for external stop signal before processing each row
+            try:
+                if stop_path.exists():
+                    logger.info("Stop file detected at %s; terminating harvest loop gracefully.", stop_path)
+                    break
+            except Exception as e:
+                logger.warning("Failed to check stop file %s: %s", stop_path, e)
+
             if not row or all(not (v and v.strip()) for v in row.values()):
                 continue
 
@@ -177,7 +192,7 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
                 logger.warning("PDF error for cas=%s: %s", cas_val, pdf_result.get('error'))
 
             # Heartbeat to console (keep this printed to console as before)
-            print(f"Row {total_rows} processed: cas={cas_val}, html_ok={html_result.get('success')}, pdf_ok={pdf_result.get('success')}")
+            print(f"Row {total_rows} processed: cas={cas_val}, html_ok={html_result.get('success')}, pdf_ok={pdf_result.get('success')}, (downloaded {download_calls} of {config.max_downloads} so far)")
 
     finally:
         fh.close()

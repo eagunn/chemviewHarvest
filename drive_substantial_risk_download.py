@@ -142,7 +142,6 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
         logger.info("No downloads needed for cas=%s (substantial risk)", cas_val)
         return result
 
-    result['attempted'] = True
 
     # Ensure debug_out and cas_dir exist
     if debug_out is None:
@@ -162,105 +161,113 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
         logger.error(msg)
         result['html']['error'] = msg
         result['pdf']['error'] = msg
-        # Record failures in DB for attempted file types
-        if need_html:
-            try:
-                db.log_failure(cas_val, file_types.substantial_risk_html, '')
-            except Exception:
-                logger.exception("Failed to write failure to DB for html")
-        if need_pdf:
-            try:
-                db.log_failure(cas_val, file_types.substantial_risk_pdf, '')
-            except Exception:
-                logger.exception("Failed to write failure to DB for pdf")
         return result
 
     if page is None:
         logger.error("No page provided for URL: %s", url)
         return result
 
+    # We've passed all the pre-checks; mark that we are attempting processing
+    result['attempted'] = True
+    # Be pessimistic. Assume failure until success is confirmed.
+    if need_html:
+        result['html']['success'] = False
+    if need_pdf:
+        result['pdf']['success'] = False
+    # from this point on down, we only need to set the msg value for failures
+    # but will need to set 'success' to True on completed, confirmed successes.
+
     nav_ok = navigate_to_initial_page(page, url)
-    if nav_ok is False:
+
+    # Use positive-test style: only proceed when nav_ok is True; otherwise record an error but continue
+    if nav_ok:
+        # This chunk of logic is failing with a "Failed to find anchors with non-empty text"
+        # message every time called. I'm going to comment it out. It's possible that it
+        # serves a purpose by inserting a wait, so if we start failing, let's replace
+        # it with a simple wait of some length. But first, let's see if we can proceed without it.
+        ###################################### need a wait? ########################################
+        # Wait for SR anchors inside the initial modal to have non-empty text
+        # (anchors may be added to the DOM quickly but populated asynchronously).
+        # try:
+        #     wait_for_sr_anchors(page, modal_selector="#chemical-detail-modal-body", timeout_ms=8000)
+        # except Exception:
+        #     logger.debug("wait_for_sr_anchors raised an exception or timed out; proceeding to find anchors anyway")
+        # ############################################################################################
+        logger.debug("wait_for_sr_anchors skipped; if issues arise, consider adding a wait here")
+
+        sr_link_list = find_submission_links_on_first_modal(page)
+
+        if sr_link_list and len(sr_link_list) > 0:
+            # Iterate with an explicit 1-based index so we can number modal HTML files when there are multiple links
+            any_modal_processed = False
+            for idx, sr_link in enumerate(sr_link_list, start=1):
+                # Click the SR anchor and get back a locator for the modal that opened (or None on failure)
+                modal_locator = click_anchor_link_and_wait_for_modal(page, sr_link)
+                if modal_locator is None:
+                    logger.warning("Skipping SR link %d for cas %s because modal was not observed", idx, cas_val)
+                    continue
+
+                pdf_link_list = None
+                if need_html or need_pdf:
+                    # pass the modal locator (required) so the scraper uses the already-observed modal
+                    try:
+                        pdf_link_list = scrape_modal_html_and_gather_pdf_links(page, modal_locator, need_html, need_pdf, cas_dir, cas_val, db, file_types, url, result, item_no=idx)
+                    except Exception as e:
+                        logger.exception("Exception raised while scraping modal %d: %s", idx, e)
+                        # record processing failures
+                        result['pdf']['error'] = f"Exception while scraping modal {idx}: {e}"
+
+                if pdf_link_list:
+                    # Add discovered PDF links to the global accumulator (will be flushed to disk in batches)
+                    # For now we are simply trusting this to work and assuming success at this point.
+                    _accumulate_pdf_links_for_cas(cas_dir, pdf_link_list)
+                    result['pdf']['success'] = True
+                    result['pdf']['local_file_path'] = str(cas_dir / "substantialRiskReports")
+                    result['pdf']['navigate_via'] = url
+                # else: if we didn't find a list we are going to log this as a failure below
+        else:
+            msg = "No Substantial Risk / 8e links found on initial page"
+            logger.error(msg)
+            result['html']['error'] = msg
+            result['pdf']['error'] = msg
+            # do not return; caller will handle post-loop logging
+    else:
         msg = "Navigation to initial page failed"
         logger.error(msg)
         result['html']['error'] = msg
         result['pdf']['error'] = msg
-        # don't waste any more time on this entry
-        return result
+        # do not return; allow post-loop logic to record failures
 
-    # Wait for SR anchors inside the initial modal to have non-empty text
-    # (anchors may be added to the DOM quickly but populated asynchronously).
-    try:
-        wait_for_sr_anchors(page, modal_selector="#chemical-detail-modal-body", timeout_ms=8000)
-    except Exception:
-        logger.debug("wait_for_sr_anchors raised an exception or timed out; proceeding to find anchors anyway")
-
-    sr_link_list = find_submission_links_on_first_modal(page)
-
-    ##################################################################
-    # Disabled: This code seems to work ok when there ARE summary links,
-    # but fails with timeouts and ghost html files when there are none.
-    # Since "none" seems to be the more common case and the summary html
-    # simply pulls together info available in the other htmls files, I'm
-    # disabling this section for now to improve overall reliability.
-    # # Also look for summary/endpoint links (e.g. 'Acute toxicity') on the first modal
-    # try:
-    #     summary_links = find_summary_links_on_first_modal(page)
-    #     if summary_links:
-    #         logger.info("Found %d summary/endpoint links on initial modal", len(summary_links))
-    #         for sidx, s_link in enumerate(summary_links, start=1):
-    #             try:
-    #                 text = (s_link.inner_text() or "").strip()
-    #                 fname = sanitize_filename(text or f"summary_{sidx}") + ".html"
-    #                 scrape_summary_modal_and_save(page, s_link, cas_dir, fname)
-    #             except Exception as e:
-    #                 # Non-fatal: warn and include debug-level stack trace
-    #                 logger.warning("Failed to scrape/save summary modal for link index %d: %s", sidx, e)
-    #                 logger.debug("Exception details for summary scrape failure", exc_info=True)
-    #     else:
-    #         # Many initial modals legitimately do not have summary links; debug-level is appropriate
-    #         logger.debug("No summary/endpoint links found on initial modal")
-    # except Exception:
-    #     # Non-fatal: record a warning and keep the detailed stack at debug
-    #     import sys
-    #     e = sys.exc_info()[1]
-    #     logger.warning("Error while searching for or processing summary links on initial modal: %s", e)
-    #     logger.debug("Full exception while processing summary links", exc_info=True)
-
-    if not sr_link_list:
-        msg = "No Substantial Risk / 8e links found on initial page"
-        logger.error(msg)
-        result['html']['error'] = msg
-        result['pdf']['error'] = msg
-        # don't waste any more time on this entry
-        return result
-
-    # Iterate with an explicit 1-based index so we can number modal HTML files when there are multiple links
-    for idx, sr_link in enumerate(sr_link_list, start=1):
-        # Click the SR anchor and get back a locator for the modal that opened (or None on failure)
-        modal_locator = click_anchor_link_and_wait_for_modal(page, sr_link)
-        if modal_locator is None:
-            logger.warning("Skipping SR link %d for cas %s because modal was not observed", idx, cas_val)
-            continue
-
-        pdf_link_list = None
-        if need_html or need_pdf:
-            # pass the modal locator (required) so the scraper uses the already-observed modal
-            pdf_link_list = scrape_modal_html_and_gather_pdf_links(page, modal_locator, need_html, need_pdf, cas_dir, cas_val, db, file_types, url, result, item_no=idx)
-
-        if pdf_link_list:
-            # Add discovered PDF links to the global accumulator (will be flushed to disk in batches)
-            _accumulate_pdf_links_for_cas(cas_dir, pdf_link_list)
-            result['pdf']['success'] = True
-            result['pdf']['local_file_path'] = str(cas_dir / "substantialRiskReports")
-            result['pdf']['navigate_via'] = url
-            try:
-                db.log_success(cas_val, file_types.substantial_risk_pdf, result['pdf']['local_file_path'],
-                               result['pdf']['navigate_via'])
-            except Exception:
-                logger.exception("Failed to write success to DB for pdf")
-
-    # Note: download plan is accumulated and flushed by the module-level accumulator; no per-CAS save here.
+    # Post-loop: if we attempted processing then log failures for any file types that were explicitly set to False
+    if result.get('attempted'):
+        logger.debug(f"After modal scrape attempt, result = {result}")
+        if need_html:
+            if (result.get('html', {}).get('success') is True):
+                try:
+                    db.log_success(cas_val, file_types.substantial_risk_html, result.get('html', {}).get('local_file_path'), result.get('html', {}).get('navigate_via'))
+                except Exception:
+                    logger.exception("Failed to write success to DB for html post-loop")
+            else:
+                # HTML explicitly failed during processing -> log failure
+                msg = result.get('html', {}).get('error') or "HTML processing failed"
+                try:
+                    db.log_failure(cas_val, file_types.substantial_risk_html, msg)
+                except Exception:
+                    logger.exception("Failed to write failure to DB for html post-loop")
+            if need_pdf:
+                if (result.get('pdf', {}).get('success') is True):
+                    msg = result.get('pdf', {}).get('error')
+                    try:
+                        db.log_success(cas_val, file_types.substantial_risk_pdf, result.get('pdf', {}).get('local_file_path'), result.get('pdf', {}).get('navigate_via'))
+                    except Exception:
+                        logger.exception("Failed to write success to DB for html post-loop")
+                else:
+                    # PDF explicitly failed during processing -> log failure
+                    msg = result.get('pdf', {}).get('error') or "PDF processing failed or no links discovered"
+                    try:
+                        db.log_failure(cas_val, file_types.substantial_risk_pdf, msg)
+                    except Exception:
+                        logger.exception("Failed to write failure to DB for pdf post-loop")
 
     return result
 
@@ -268,6 +275,7 @@ def scrape_modal_html_and_gather_pdf_links(
     page, modal_locator, need_html: bool, need_pdf: bool, cas_dir: Path, cas_val, db, file_types: Any, url: str, result: Dict[str, Any], item_no: int = 1
 ) -> Any:
     logger.info(f"Processing Substantial Risk Reports modal {item_no}...")
+    pdf_link_list = None
     try:
         # The modal locator is required and should reference the modal body (or container) that is open.
         modal = modal_locator
@@ -301,6 +309,7 @@ def scrape_modal_html_and_gather_pdf_links(
                     modal_body_html = f"<div class='modal-body action'>\n{inner}\n</div>"
         except Exception:
             modal_body_html = None
+            result['html']['error'] = "Failed to locate modal body div"
 
         if modal_body_html is None:
             # final fallback: capture the modal's inner HTML and wrap it
@@ -311,39 +320,43 @@ def scrape_modal_html_and_gather_pdf_links(
             except Exception:
                 modal_body_html = ""
 
-        pdf_link_list = []
-        if need_html:
-            logger.info("Saving modal HTML")
-            html_path = cas_dir / f"sr_{modal_ident_safe}.html"
-            with open(html_path, 'w', encoding='utf-8') as fh:
-                fh.write(modal_body_html)
-            logger.info("Saved modal HTML to %s", html_path)
-            result['html']['success'] = True
-            result['html']['local_file_path'] = str(html_path)
-            result['html']['navigate_via'] = url
-            db.log_success(cas_val, file_types.substantial_risk_html, str(html_path), url)
+        if modal_body_html is not None and modal_body_html != "":
+            if need_html:
+                logger.info("Saving modal HTML")
+                html_path = cas_dir / f"sr_{modal_ident_safe}.html"
+                with open(html_path, 'w', encoding='utf-8') as fh:
+                    fh.write(modal_body_html)
+                logger.info("Saved modal HTML to %s", html_path)
+                result['html']['success'] = True
+                result['html']['local_file_path'] = str(html_path)
+                result['html']['navigate_via'] = url
 
-        if need_pdf:
-            logger.info("Finding PDF download links in the modal")
-            pdf_anchors = modal.locator("li a.show_external_link")
-            pdf_link_list = pdf_anchors.evaluate_all("anchors => anchors.map(a => a.href)")
-            logger.info("Found %d PDF download links", len(pdf_link_list))
+            pdf_link_list = []
+            if need_pdf:
+                logger.info("Finding PDF download links in the modal")
+                pdf_anchors = modal.locator("li a.show_external_link")
+                pdf_link_list = pdf_anchors.evaluate_all("anchors => anchors.map(a => a.href)")
+                logger.info("Found %d PDF download links", len(pdf_link_list))
+                # result success will be declared / filled-in by the caller after values are written to json file
 
-        # Close the modal using a robust locator and auto-wait
-        close_btn = modal.locator("a.close[data-dismiss='modal']")
-        if close_btn is not None:
-            logger.debug("Will try to close modal")
-            close_btn.click()
-            modal.wait_for(state="hidden", timeout=5000)
-            logger.debug("Closed modal successfully")
-        else:
-            logger.warning("Close button not found in modal; skipping close")
+            # Close the modal using a robust locator and auto-wait
+            close_btn = modal.locator("a.close[data-dismiss='modal']")
+            if close_btn is not None:
+                logger.debug("Will try to close modal")
+                close_btn.click()
+                modal.wait_for(state="hidden", timeout=5000)
+                logger.debug("Closed modal successfully")
+            else:
+                logger.warning("Close button not found in modal; skipping close")
 
         return pdf_link_list
 
     except Exception as e:
         logger.exception("Error while processing the modal: %s", e)
-        return []
+        result['html']['error'] = f"Exception while processing modal: {e}"
+        result['pdf']['error'] = f"Exception while processing modal: {e}"
+
+    return pdf_link_list
 
 # def click_anchor_link_and_wait_for_modal(page, sr_link: Any | None):
 #     # For summary links, only use element_handle.click() to avoid double modal opening
@@ -560,37 +573,37 @@ def click_anchor_link_and_wait_for_modal(page, sr_link: Any | None) -> Optional[
     return None
 
 def find_submission_links_on_first_modal(page):
+    sr_link_list = []
     try:
-        # Replace query_selector_all with locators for finding anchors
         anchors = page.locator('div#chemical-detail-modal-body a[href]')
         logger.debug("Found %d href anchors on page", anchors.count())
-
-        sr_link_list = []
         for i in range(anchors.count()):
             try:
                 anchor = anchors.nth(i)
                 text = anchor.inner_text().strip()
                 logger.debug("anchor text: %s", text)
                 if text.startswith("* TSCA \u00A7 8(e) Submission"):
-                    # Log key attributes to help trace which anchors map to which modals
-                    try:
-                        a_attrs = {
-                            'href': anchor.get_attribute('href'),
-                            'data-target': anchor.get_attribute('data-target'),
-                            'id': anchor.get_attribute('id'),
-                            'onclick': anchor.get_attribute('onclick'),
-                            'text': text
-                        }
-                        logger.info("Found SR/8e link")
-                        logger.debug("SR anchor attributes: %s", a_attrs)
-                    except Exception:
-                        logger.info("Found SR/8e link (attributes unavailable)")
+                    # # Log key attributes to help trace which anchors map to which modals
+                    # try:
+                    #     a_attrs = {
+                    #         'href': anchor.get_attribute('href'),
+                    #         'data-target': anchor.get_attribute('data-target'),
+                    #         'id': anchor.get_attribute('id'),
+                    #         'onclick': anchor.get_attribute('onclick'),
+                    #         'text': text
+                    #     }
+                    #     logger.debug("SR anchor attributes: %s", a_attrs)
+                    # except Exception:
+                    #     logger.info("Found SR/8e link (attributes unavailable)")
+                    logger.debug("Found SR/8e link")
                     sr_link_list.append(anchor)
             except Exception:
+                logger.warning("Exception while processing anchor %d", i, exc_info=True)
                 continue
-        return sr_link_list
+            logger.info(f"Found {len(sr_link_list)} SR/8e links on page")
     except Exception:
-        return []
+        logger.error("Exception while finding SR/8e link", exc_info=True)
+    return sr_link_list
 
 def navigate_to_initial_page(page, url):
     nav_ok = False
