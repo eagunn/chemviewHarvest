@@ -19,7 +19,7 @@ def makeAndChangeToFolder(folderName):
     if not os.path.exists(folderName):
         os.makedirs(folderName)
     os.chdir(folderName)
-    logger.info(f"About to process files for folder: {folderName}")
+    logger.info(f"About to process files for folder: {os.getcwd()}")
 
 
 def extract_filename_from_url(downloadURL: str) -> str:
@@ -152,16 +152,16 @@ def main():
 
     # Require the input JSON file path as the first argument. Exit code 2 if missing.
     if len(sys.argv) < 2 or not sys.argv[1].strip():
-        print("Usage: python getFiles.py <path-to-download-json>", file=sys.stderr)
+        print("Usage: python getFiles.py <path to download-files-json>", file=sys.stderr)
         sys.exit(2)
 
     jsonPath = sys.argv[1]
 
-    # configure logging to write to get.log (overwrite each run)
+    # configure logging to write to get.log (append mode)
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format='%(asctime)s %(levelname)s [%(name)s:%(lineno)d] %(message)s',
-        handlers=[logging.FileHandler('getFiles.log', mode='w', encoding='utf-8')]
+        handlers=[logging.FileHandler('getFiles.log', mode='a', encoding='utf-8')]
     )
     logger.info("in main, about to open json file")
     startTime = time.time()
