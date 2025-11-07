@@ -19,6 +19,7 @@ debug_artifacts/
 # input and output files
 input_files/
 chemview_archive*/
+pdfDownloadsToDo/
 
 # database files don't go in the repo for now
 *.db
@@ -26,4 +27,7 @@ chemview_archive*/
 # report files 
 *.txt
 
+# miscellany
 modal_population_resilience.md
+aiTests/
+oldStuff/
