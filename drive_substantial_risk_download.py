@@ -60,6 +60,9 @@ def _need_download_from_db(db, cas_val: str, file_type: str) -> bool:
             else:
                 # no success, no failure -> need download
                 do_need_download = True
+    else:
+        # no record -> need download
+        do_need_download = True
     return do_need_download
 
 
@@ -731,7 +734,7 @@ def download_pdfs(pdf_links: list[str], cas_dir: Path, session: Optional[request
 
                 # Check if the file already exists
                 if pdf_path.exists():
-                    logger.debug("Skipping download, file already exists: %s", pdf_path)
+                    #logger.debug("Skipping download, file already exists: %s", pdf_path)
                     continue
 
                 pdf_url_unescaped = html_lib.unescape(pdf_url or "")

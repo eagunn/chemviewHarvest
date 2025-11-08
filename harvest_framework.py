@@ -192,7 +192,7 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
                 logger.warning("PDF error for cas=%s: %s", cas_val, pdf_result.get('error'))
 
             # Heartbeat to console (keep this printed to console as before)
-            print(f"Row {total_rows} processed: cas={cas_val}, html_ok={html_result.get('success')}, pdf_ok={pdf_result.get('success')}, (downloaded {download_calls} of {config.max_downloads} so far)")
+            print(f"Row {total_rows}: cas={cas_val}, html_ok={html_result.get('success')}, pdf_ok={pdf_result.get('success')}, (processed {download_calls} of {config.max_downloads} so far)")
 
     finally:
         fh.close()
