@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import atexit
 import re
 
@@ -23,27 +23,44 @@ PDF_PLAN_OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _need_download_from_db(db, cas_val: str, file_type: str) -> bool:
-    """Return True if the driver should attempt a download for this cas/file_type.
-    Policy: if no record -> True; if record and last_success_datetime is null -> True; if last_failure exists but no success -> skip retry (False).
+    """
+    Policy:
+    - If no record: return True
+    - If record and last_success_datetime is not null: return False (do not retry if any success)
+    - If record and last_success_datetime is null:
+        - If last_failure_datetime is null: return True
+        - If last_failure_datetime is less than 24 hours ago: return False
+        - If last_failure_datetime is more than 24 hours ago: return True
     """
     record = None
+    do_need_download = False
     try:
         record = db.get_harvest_status(cas_val, file_type)
     except Exception:
         logger.exception("DB read failed when checking need for %s / %s", cas_val, file_type)
-        return True
+        # If we can't read the db, we don't want to be doing downloads.
+        # We'll return the false set above
+
     if record:
         last_success = record.get('last_success_datetime')
         last_failure = record.get('last_failure_datetime')
-        if not last_success:
-            if not last_failure:
-                return True
+        # If any success is recorded, do not retry
+        if last_success:
+            logger.debug("Found prior success for %s / %s; no download needed", cas_val, file_type)
+        else:
+        # If no success, check failure interval
+            if last_failure:
+                now = datetime.now()
+                last_failure_dt = datetime.fromisoformat(str(last_failure))
+                if now - last_failure_dt > timedelta(hours=24):
+                    do_need_download = True
+                    logger.debug("Found old-enough  prior failure for %s / %s", cas_val, file_type)
+                else:
+                    logger.debug("Found too-new prior failure for %s / %s; no download needed", cas_val, file_type)
             else:
-                logger.info("****Skipping retry FOR NOW for id %s / %s, previous failure at %s", cas_val, file_type, last_failure)
-                return False
-        return False
-    else:
-        return True
+                # no success, no failure -> need download
+                do_need_download = True
+    return do_need_download
 
 
 # --- helpers for building and saving a per-run JSON download plan ---
@@ -116,6 +133,7 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
       - 'pdf': {success, local_file_path, error, navigate_via}
     """
     result: Dict[str, Any] = {
+        'CAS:': cas_val,
         'attempted': False,
         'html': {'success': None, 'local_file_path': None, 'error': None, 'navigate_via': ''},
         'pdf': {'success': None, 'local_file_path': None, 'error': None, 'navigate_via': ''}
@@ -181,19 +199,6 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
 
     # Use positive-test style: only proceed when nav_ok is True; otherwise record an error but continue
     if nav_ok:
-        # This chunk of logic is failing with a "Failed to find anchors with non-empty text"
-        # message every time called. I'm going to comment it out. It's possible that it
-        # serves a purpose by inserting a wait, so if we start failing, let's replace
-        # it with a simple wait of some length. But first, let's see if we can proceed without it.
-        ###################################### need a wait? ########################################
-        # Wait for SR anchors inside the initial modal to have non-empty text
-        # (anchors may be added to the DOM quickly but populated asynchronously).
-        try:
-            wait_for_sr_anchors(page, modal_selector="#chemical-detail-modal-body", timeout_ms=8000)
-        except Exception:
-            logger.debug("wait_for_sr_anchors raised an exception or timed out; proceeding to find anchors anyway")
-        # ############################################################################################
-        logger.debug("wait_for_sr_anchors skipped; if issues arise, consider adding a wait here")
 
         sr_link_list = find_submission_links_on_first_modal(page)
 
@@ -574,35 +579,50 @@ def click_anchor_link_and_wait_for_modal(page, sr_link: Any | None) -> Optional[
 
 def find_submission_links_on_first_modal(page):
     sr_link_list = []
+    # 1. Define the Locator for the specific anchors you want.
+    # Playwright is smart enough to search only within the visible
+    # modal if it's the only element matching this selector.
+    anchors_locator = page.locator('div#chemical-detail-modal-body a[href]')
+    anchors = []
     try:
-        anchors = page.locator('div#chemical-detail-modal-body a[href]')
-        logger.debug("Found %d href anchors on page", anchors.count())
-        for i in range(anchors.count()):
-            try:
-                anchor = anchors.nth(i)
-                text = anchor.inner_text().strip()
-                logger.debug("anchor text: %s", text)
-                if text.startswith("* TSCA \u00A7 8(e) Submission"):
-                    # # Log key attributes to help trace which anchors map to which modals
-                    # try:
-                    #     a_attrs = {
-                    #         'href': anchor.get_attribute('href'),
-                    #         'data-target': anchor.get_attribute('data-target'),
-                    #         'id': anchor.get_attribute('id'),
-                    #         'onclick': anchor.get_attribute('onclick'),
-                    #         'text': text
-                    #     }
-                    #     logger.debug("SR anchor attributes: %s", a_attrs)
-                    # except Exception:
-                    #     logger.info("Found SR/8e link (attributes unavailable)")
-                    logger.debug("Found SR/8e link")
-                    sr_link_list.append(anchor)
-            except Exception:
-                logger.warning("Exception while processing anchor %d", i, exc_info=True)
-                continue
-            logger.info(f"Found {len(sr_link_list)} SR/8e links on page")
-    except Exception:
-        logger.error("Exception while finding SR/8e link", exc_info=True)
+        # 2. Explicitly wait for the *first* matching anchor to be visible.
+        # 8 second wait has been maximum needed when logs are reviewed.
+        anchors_locator.first.wait_for(state="visible", timeout=8000)
+        # 3. Once at least one is visible, retrieve all matching Locators.
+        # Note: .all() returns a list of Locators, ready for iteration.
+        anchors = anchors_locator.all()
+    except TimeoutError:
+        # Handle the case where the element never appears within the timeout
+        logger.warning("Timeout: No href anchors appeared before timeout.")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while waiting for anchors: {e}")
+
+    # Continue with your logic using the 'anchors' list
+    logger.debug("Found %d href anchors on page", len(anchors))
+    for i, anchor in enumerate(anchors):
+        try:
+            text = anchor.inner_text().strip()
+            logger.debug("anchor text: %s", text)
+            if text.startswith("* TSCA \u00A7 8(e) Submission"):
+                # # Log key attributes to help trace which anchors map to which modals
+                # try:
+                #     a_attrs = {
+                #         'href': anchor.get_attribute('href'),
+                #         'data-target': anchor.get_attribute('data-target'),
+                #         'id': anchor.get_at tribute('id'),
+                #         'onclick': anchor.get_attribute('onclick'),
+                #         'text': text
+                #     }
+                #     logger.debug("SR anchor attributes: %s", a_attrs)
+                # except Exception:
+                #     logger.info("Found SR/8e link (attributes unavailable)")
+                logger.debug("Found SR/8e link")
+                sr_link_list.append(anchor)
+        except Exception:
+            logger.warning("Exception while processing anchor %d", i, exc_info=True)
+            continue
+        logger.info(f"Found {len(sr_link_list)} SR/8e links on page")
+
     return sr_link_list
 
 def navigate_to_initial_page(page, url):
