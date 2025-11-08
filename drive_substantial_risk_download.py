@@ -188,10 +188,10 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
         ###################################### need a wait? ########################################
         # Wait for SR anchors inside the initial modal to have non-empty text
         # (anchors may be added to the DOM quickly but populated asynchronously).
-        # try:
-        #     wait_for_sr_anchors(page, modal_selector="#chemical-detail-modal-body", timeout_ms=8000)
-        # except Exception:
-        #     logger.debug("wait_for_sr_anchors raised an exception or timed out; proceeding to find anchors anyway")
+        try:
+            wait_for_sr_anchors(page, modal_selector="#chemical-detail-modal-body", timeout_ms=8000)
+        except Exception:
+            logger.debug("wait_for_sr_anchors raised an exception or timed out; proceeding to find anchors anyway")
         # ############################################################################################
         logger.debug("wait_for_sr_anchors skipped; if issues arise, consider adding a wait here")
 
