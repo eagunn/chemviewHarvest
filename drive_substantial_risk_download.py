@@ -4,6 +4,8 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import logging
 from typing import Dict, Any, Optional
+
+from playwright.sync_api import sync_playwright
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import json
@@ -128,12 +130,9 @@ def save_download_plan(plan: Dict[str, Any], debug_out: Path) -> Path:
 
 
 def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, file_types: Any = None) -> Dict[str, Any]:
-    """Stub substantial risk driver. Uses DB to decide whether to attempt, then returns random outcomes and logs them to DB.
+    """Use DB to decide whether to attempt, then returns random outcomes and logs them to DB.
 
-    Returns a dict with keys:
-      - 'attempted': bool (True if any download was attempted)
-      - 'html': {success, local_file_path, error, navigate_via}
-      - 'pdf': {success, local_file_path, error, navigate_via}
+    Returns a dict result, see structure below
     """
     result: Dict[str, Any] = {
         'CAS:': cas_val,
@@ -162,7 +161,6 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
     if not need_html and not need_pdf:
         logger.info("No downloads needed for cas=%s (substantial risk)", cas_val)
         return result
-
 
     # Ensure debug_out and cas_dir exist
     if debug_out is None:
@@ -198,13 +196,11 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
     # from this point on down, we only need to set the msg value for failures
     # but will need to set 'success' to True on completed, confirmed successes.
 
-    nav_ok = navigate_to_initial_page(page, url)
+    nav_ok = navigate_to_chemical_overview_modal(page, url)
 
-    # Use positive-test style: only proceed when nav_ok is True; otherwise record an error but continue
+    # Use positive-test style: only proceed when nav_ok is True; otherwise record an error
     if nav_ok:
-
-        sr_link_list = find_submission_links_on_first_modal(page)
-
+        sr_link_list = find_submission_links_on_chemical_overview_modal(page)
         if sr_link_list and len(sr_link_list) > 0:
             # Iterate with an explicit 1-based index so we can number modal HTML files when there are multiple links
             any_modal_processed = False
@@ -240,7 +236,7 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
             result['pdf']['error'] = msg
             # do not return; caller will handle post-loop logging
     else:
-        msg = "Navigation to initial page failed"
+        msg = "Navigation to chemical overview modal failed"
         logger.error(msg)
         result['html']['error'] = msg
         result['pdf']['error'] = msg
@@ -366,221 +362,59 @@ def scrape_modal_html_and_gather_pdf_links(
 
     return pdf_link_list
 
-# def click_anchor_link_and_wait_for_modal(page, sr_link: Any | None):
-#     # For summary links, only use element_handle.click() to avoid double modal opening
-#     if sr_link:
-#         try:
-#             # Log some anchor attributes to help debugging which link we're about to click
-#             attrs = {
-#                 'href': sr_link.get_attribute('href'),
-#                 'data-target': sr_link.get_attribute('data-target'),
-#                 'id': sr_link.get_attribute('id'),
-#                 'onclick': sr_link.get_attribute('onclick'),
-#                 'text': (sr_link.inner_text() or '').strip()
-#             }
-#             logger.debug("About to click SR anchor with attributes: %s", attrs)
-#         except Exception:
-#             logger.debug("About to click SR anchor but failed to read attributes")
-#         try:
-#             # Prefer locator/element click which has auto-wait behavior
-#             sr_link.click(timeout=30000)
-#             logger.debug("Clicked anchor via locator.click()")
-#             # Give the page a short moment to process the click and begin opening the modal
-#             try:
-#                 page.wait_for_timeout(250)
-#                 logger.debug("Short wait after click to allow modal open to start")
-#             except Exception:
-#                 pass
-#         except Exception as e:
-#             logger.warning("Failed to click anchor via locator.click(): %s", e)
-#
-#         # After clicking, try to wait for the modal that the anchor is supposed to open.
-#         modal_observed = False
-#         # First, try to derive a modal id from data-target or href (both may be like '#modal_...')
-#         try:
-#             data_target = None
-#             try:
-#                 data_target = sr_link.get_attribute('data-target')
-#             except Exception:
-#                 data_target = None
-#             if data_target:
-#                 modal_id = data_target.lstrip('#')
-#                 sel = f"div.modal#{modal_id}:visible, div.modal#{modal_id} div.modal-body:visible"
-#                 logger.debug("Waiting for modal selector derived from data-target: %s", sel)
-#                 try:
-#                     page.locator(sel).first.wait_for(state="visible", timeout=15000)
-#                     modal_observed = True
-#                 except Exception as e:
-#                     logger.debug("Waiting for modal by data-target failed: %s", e)
-#             else:
-#                 # try href if it's a fragment like '#modal_xyz'
-#                 href = None
-#                 try:
-#                     href = sr_link.get_attribute('href')
-#                 except Exception:
-#                     href = None
-#                 if href and href.startswith('#'):
-#                     modal_id = href.lstrip('#')
-#                     sel = f"div.modal#{modal_id}:visible, div.modal#{modal_id} div.modal-body:visible"
-#                     logger.debug("Waiting for modal selector derived from href: %s", sel)
-#                     try:
-#                         page.locator(sel).first.wait_for(state="visible", timeout=15000)
-#                         modal_observed = True
-#                     except Exception as e:
-#                         logger.debug("Waiting for modal by href fragment failed: %s", e)
-#         except Exception as e:
-#             logger.debug("Exception while trying to derive modal id from anchor: %s", e)
-#
-#         # Fallback: wait for the topmost visible modal that contains a modal-body
-#         if not modal_observed:
-#             try:
-#                 # Use a selector that finds visible modals containing a modal-body and pick the last (topmost)
-#                 sel = "div.modal:has(div.modal-body):visible"
-#                 logger.debug("Falling back to waiting for topmost modal selector: %s", sel)
-#                 locator = page.locator(sel)
-#                 # wait for at least one to become visible, then ensure the last one is visible
-#                 locator.first.wait_for(state="visible", timeout=15000)
-#                 # also wait for the last/topmost modal to be visible
-#                 try:
-#                     locator.last.wait_for(state="visible", timeout=2000)
-#                 except Exception:
-#                     pass
-#                 modal_observed = True
-#             except Exception as e:
-#                 logger.debug("Fallback wait for topmost visible modal failed: %s", e)
-#
-#         if not modal_observed:
-#             logger.warning("Did not observe modal become visible after clicking anchor")
-#     else:
-#         logger.warning("No SR/8e link found on page")
-#     return page
 
-def click_anchor_link_and_wait_for_modal(page, sr_link: Any | None) -> Optional[Any]:
-    """Click the given SR anchor and return a Locator for the modal that opened.
-    Returns a Locator for the modal container (or modal body) or None on failure.
-
-    Heuristics used to select the correct modal:
-    - If the anchor exposes a data-target or href fragment, try to wait for that modal id and verify it contains expected content.
-    - Otherwise poll visible modals and pick the first one that appears to contain expected content (PDF anchors, bracketed identifier, or substantial non-loading text).
+def click_anchor_link_and_wait_for_modal(page, sr_link):
+    """
+    Clicks the given SR anchor and waits robustly for the unique visible modal
+    to appear and contain the expected content. Returns the Locator for the modal container.
     """
     if sr_link is None:
         logger.warning("No SR/8e link passed to click_anchor_link_and_wait_for_modal")
         return None
 
-    # Try to click the anchor robustly
+    # --- 1. Click the Anchor ---
     try:
         sr_link.click(timeout=30000)
         logger.debug("Clicked SR anchor via locator.click()")
+    except TimeoutError:
+        logger.warning("Failed to click SR anchor within 30s timeout.")
+        return None
     except Exception as e:
-        logger.debug("locator.click() failed, attempting element_handle.click(): %s", e)
-        try:
-            el = sr_link.element_handle()
-            if el:
-                el.click()
-                logger.debug("Clicked SR anchor via element_handle.click()")
-        except Exception as e2:
-            logger.warning("Failed to click SR anchor: %s / %s", e, e2)
-            return None
+        logger.warning("Failed to click SR anchor due to unexpected error: %s", e)
+        return None
 
-    # give page JS a short moment to begin opening the modal
+    # --- 2. Define the Target Modal Locator (Simplified) ---
+
+    # We rely on the core Bootstrap/CSS classes to find the *unique* visible modal.
+    # We remove ALL complex logic involving data-target/href derivation, modal_id,
+    # and CSS.escape, as this was the source of the failure.
+    visible_modal_locator = page.locator("div.modal.show, div.modal.in")
+
+    # --- 3. Wait for Modal and Expected Content ---
+
+    # Define the locator for the critical content (PDF anchors) *inside* the visible modal.
+    # This guarantees the modal has opened AND has finished populating its dynamic content.
+    final_content_locator = visible_modal_locator.locator("li a.show_external_link")
+
     try:
-        page.wait_for_timeout(250)
-    except Exception:
-        pass
+        # Wait for the first PDF anchor to be visible inside the target modal.
+        final_content_locator.first.wait_for(state="visible", timeout=20000)
 
-    # Helper to determine whether a candidate modal likely contains the content we want
-    def candidate_has_expected_content(candidate) -> bool:
-        try:
-            # 1) PDF anchors
-            if candidate.locator("li a.show_external_link").count() > 0:
-                return True
-        except Exception:
-            pass
-        try:
-            # 2) bracketed identifier in id like [8EHQ-...]
-            mid = candidate.get_attribute("id") or ""
-            if re.search(r"\[([^]]+)]", mid):
-                return True
-        except Exception:
-            pass
-        try:
-            # 3) substantial inner text that is not a short loading placeholder
-            txt = (candidate.inner_text() or "").strip()
-            if len(txt) > 80 and "loading" not in txt.lower():
-                return True
-        except Exception:
-            pass
-        return False
+        # Now that we know the content is loaded and the correct modal is up,
+        # we return the unique visible modal's locator.
+        logger.info("New modal observed and content verified.")
 
-    # 1) If the anchor provides a data-target or href fragment, try to resolve that modal id first
-    try:
-        dt = None
-        try:
-            dt = sr_link.get_attribute("data-target")
-        except Exception:
-            dt = None
-        if not dt:
-            try:
-                href = sr_link.get_attribute("href")
-                if href and href.startswith("#"):
-                    dt = href
-            except Exception:
-                dt = None
+        # We can safely return the simplified locator for the visible modal container.
+        return visible_modal_locator
 
-        if dt:
-            modal_id = dt.lstrip('#')
-            sel = f"div.modal#{modal_id}"
-            logger.debug("Derived modal id from anchor: %s -> selector %s", modal_id, sel)
-            total = 15000
-            step = 500
-            elapsed = 0
-            while elapsed < total:
-                try:
-                    cand = page.locator(sel)
-                    if cand.count() > 0:
-                        # use the first matching container
-                        cand_container = cand.first
-                        if candidate_has_expected_content(cand_container):
-                            logger.info("New modal observed after click (id=%s)", modal_id)
-                            return cand_container
-                except Exception:
-                    pass
-                page.wait_for_timeout(step)
-                elapsed += step
-            logger.debug("Timed out waiting for derived modal id %s", modal_id)
-    except Exception:
-        logger.debug("Exception while deriving modal id from anchor", exc_info=True)
+    except TimeoutError:
+        logger.warning("Timed out waiting for new modal to open and contain expected PDF anchor content after 20s.")
+        return None
+    except Exception as e:
+        logger.error("Error during final modal wait: %s", e)
+        return None
 
-    # 2) Fallback: poll visible modals and pick the first one that has expected content
-    total = 20000
-    step = 500
-    elapsed = 0
-    while elapsed < total:
-        try:
-            mods = page.locator("div.modal:has(div.modal-body):visible")
-            n = mods.count()
-            # iterate topmost-first
-            for i in range(n - 1, -1, -1):
-                try:
-                    cand_container = mods.nth(i)
-                    if candidate_has_expected_content(cand_container):
-                        try:
-                            mid = cand_container.get_attribute("id")
-                        except Exception:
-                            mid = None
-                        logger.info("Selected visible modal after click (id=%s)", mid)
-                        return cand_container
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        page.wait_for_timeout(step)
-        elapsed += step
-
-    logger.warning("Did not observe target modal become visible/contain expected content after clicking anchor")
-    return None
-
-def find_submission_links_on_first_modal(page):
+def find_submission_links_on_chemical_overview_modal(page):
     sr_link_list = []
     # 1. Define the Locator for the specific anchors you want.
     # Playwright is smart enough to search only within the visible
@@ -606,7 +440,9 @@ def find_submission_links_on_first_modal(page):
         try:
             text = anchor.inner_text().strip()
             logger.debug("anchor text: %s", text)
-            if text.startswith("* TSCA \u00A7 8(e) Submission"):
+            # The following was missing some anchors. Trying to be a bit less precise
+            #if text.startswith("* TSCA \u00A7 8(e) Submission"):
+            if text.startswith("* TSCA \u00A7 8(e) "):
                 # # Log key attributes to help trace which anchors map to which modals
                 # try:
                 #     a_attrs = {
@@ -628,65 +464,44 @@ def find_submission_links_on_first_modal(page):
 
     return sr_link_list
 
-def navigate_to_initial_page(page, url):
-    nav_ok = False
-    nav_timeouts = [30000, 60000, 90000]
+
+def navigate_to_chemical_overview_modal(page, url: str) -> bool:
+    """
+    Navigates to the URL and waits for the chemical overview modal content to be visible.
+
+    Uses a single, maximum timeout for reliability, and the Locator API
+    for robust waiting on the modal element.
+    """
     selector = "div#chemical-detail-modal-body"
-    for attempt, to in enumerate(nav_timeouts, start=1):
-        try:
-            # Try to navigate to the page (DOM content loaded)
-            page.goto(url, wait_until="domcontentloaded", timeout=to)
-        except Exception as e:
-            logger.warning("Navigation attempt %d failed (timeout=%dms): %s", attempt, to, e)
-            try:
-                # Short wait before next attempt to avoid beating the server
-                page.wait_for_timeout(500)
-            except Exception:
-                pass
-            # try the next timeout value
-            continue
-
-        # After a successful goto, wait for the modal to appear. Only when this wait
-        # succeeds do we consider navigation truly successful for our purposes.
-        try:
-            page.wait_for_selector(selector, timeout=10000)
-            nav_ok = True
-            logger.info("Initial navigation and modal presence succeeded on attempt %d", attempt)
-            break
-        except Exception as e:
-            logger.warning("Modal selector '%s' not found after navigation attempt %d: %s", selector, attempt, e)
-            try:
-                page.wait_for_timeout(500)
-            except Exception:
-                pass
-            # continue to next attempt
-            continue
-
-    if not nav_ok:
-        logger.error("Navigation ultimately failed for URL, processing should stop")
-
-    return nav_ok
-
-def wait_for_sr_anchors(page, modal_selector: str = '#chemical-detail-modal-body', timeout_ms: int = 7000):
-    """
-    Wait until at least one anchor inside `modal_selector li a.show_external_link`
-    has non-empty text. Returns the list of anchors (may be empty on timeout).
-    """
-    sel = f"{modal_selector} li a.show_external_link"
+    timeout_ms = 30000
+    # 1. Navigate to the page with a single, generous timeout (90s default)
     try:
-        # Use Playwright's locator API to wait for at least one anchor with non-empty text
-        anchors = page.locator(sel)
-        anchors.first.wait_for(state="visible", timeout=timeout_ms)
-
-        # Filter anchors with non-empty text
-        valid_anchors = anchors.filter(
-            has_text=lambda text: text.strip() != ""
-        )
-        logger.debug("Found %d valid anchors with non-empty text", valid_anchors.count())
-        return valid_anchors.all()
+        # Use page.goto and rely on Playwright's default internal retry mechanisms if needed
+        # We target 'domcontentloaded' as it's the fastest signal that the basic page structure is ready.
+        page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        logger.info(f"Navigation to URL successful: {url}")
+    except TimeoutError as e:
+        logger.error(f"Initial navigation to URL timed out ({timeout_ms}ms): {e}")
+        return False
     except Exception as e:
-        logger.warning("Failed to find anchors with non-empty text: %s", e)
-        return []
+        logger.error(f"Initial navigation failed unexpectedly: {e}")
+        return False
+
+    # 2. Use the Locator API to wait for the required modal content.
+    # The locator will retry finding and checking the visibility of the element
+    # until the timeout (default 30s, or you can pass a custom timeout here).
+    try:
+        modal_locator = page.locator(selector)
+        # Explicitly wait for the modal content to be visible. This replaces page.wait_for_selector().
+        modal_locator.wait_for(state="visible", timeout=15000)  # Use 15s wait for the modal
+        logger.info("Modal content is present and visible.")
+        return True
+    except TimeoutError as e:
+        logger.error(f"Modal content selector '{selector}' not found or visible within timeout (15s).")
+        return False
+    except Exception as e:
+        logger.error(f"Error while waiting for modal visibility: {e}")
+        return False
 
 def generate_local_pdf_path(pdf_url: str, reports_dir: Path) -> Path:
     """Generate the local file path for a given PDF URL."""
@@ -769,51 +584,6 @@ def download_pdfs(pdf_links: list[str], cas_dir: Path, session: Optional[request
                 s.close()
             except Exception:
                 pass
-
-def find_summary_links_on_first_modal(page):
-    """Find links like 'viewAllEndpoint-...' inside the first chemical detail modal.
-    Returns a list of element handles (may be empty).
-    """
-    try:
-        # Prefer anchors with ids that start with viewAllEndpoint-
-        anchors = page.query_selector_all('div#chemical-detail-modal-body a[id^="viewAllEndpoint-"]')
-        if anchors:
-            logger.debug("Found %d summary anchors by id prefix", len(anchors))
-            return anchors
-    except Exception:
-        pass
-
-    # Fallback: search for anchors with a visible text that looks like an endpoint name
-    try:
-        anchors = page.query_selector_all('div#chemical-detail-modal-body a[href="#"], div#chemical-detail-modal-body a[onclick]')
-        summary_anchors = []
-        for a in anchors:
-            try:
-                text = (a.inner_text() or "").strip()
-                # crude heuristic: endpoint links often contain a space and a number in parentheses
-                if text and '(' in text and text.split('(')[0].strip():
-                    summary_anchors.append(a)
-            except Exception:
-                continue
-        logger.debug("Found %d summary anchors by heuristic", len(summary_anchors))
-        return summary_anchors
-    except Exception:
-        return []
-
-def sanitize_filename(text: str) -> str:
-    """Sanitize anchor text into a filesystem-safe, short filename (lowercase, underscores)."""
-    import re
-
-    name = text.strip().lower()
-    # Remove parentheses contents first
-    name = re.sub(r"\([^)]*\)", "", name)
-    # replace non-alphanumeric with underscores
-    name = re.sub(r"[^a-z0-9]+", "_", name)
-    name = name.strip("_")
-    if not name:
-        name = "summary"
-    return name[:100]
-
 
 def scrape_summary_modal_and_save(page, anchor, cas_dir: Path, filename: str):
     """Click the given anchor to open the summary overlay/modal, wait for #viewAllEndpointBody to be visible and populated,
