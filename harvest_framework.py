@@ -119,6 +119,7 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
             try:
                 if stop_path.exists():
                     logger.info("Stop file detected at %s; terminating harvest loop gracefully.", stop_path)
+                    print("Stop file detected; terminating harvest loop.")
                     break
             except Exception as e:
                 logger.warning("Failed to check stop file %s: %s", stop_path, e)
@@ -127,10 +128,9 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
                 continue
 
             total_rows += 1
-
             # Skip rows until the start_row is reached
             if config.start_row is not None and total_rows < config.start_row:
-                logger.debug("Skipping row %d due to start_row=%d", total_rows, config.start_row)
+                #logger.debug("Skipping row %d due to start_row=%d", total_rows, config.start_row)
                 continue
 
             # Stop if we've reached the configured number of actual download attempts
