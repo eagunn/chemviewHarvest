@@ -227,10 +227,10 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
         logger.info("Total rows read: %d", total_rows)
         logger.info("HTML captures succeeded: %d", html_success_count)
         logger.info("PDF downloads succeeded: %d", pdf_success_count)
-        logger.info("Total download time (seconds): %.3f", total_download_time)
+        logger.info("Total processing time (seconds): %.3f", total_download_time)
         if download_calls:
             avg = total_download_time / download_calls
-            logger.info("Average download time (seconds) over %d calls: %.3f", download_calls, avg)
+            logger.info("Average processing time (seconds) over %d calls: %.3f", download_calls, avg)
         else:
             logger.info("No download calls were made; average download time N/A")
     except Exception:
