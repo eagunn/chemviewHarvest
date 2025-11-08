@@ -181,14 +181,14 @@ def main():
     lines.append(f"  Projected total PDF bytes: {projected_total_pdf_bytes:,} ({format_size(projected_total_pdf_bytes)})")
     lines.append(f"  Projected total XML bytes: {projected_total_xml_bytes:,} ({format_size(projected_total_xml_bytes)})")
     lines.append(f"  Projected total (all types) bytes: {projected_total_all_bytes:,} ({format_size(projected_total_all_bytes)})")
-    lines.append("")
-    lines.append("Per-CAS summary (first 50 entries shown):")
-    shown = 0
-    for cas_name, stats in per_cas_stats.items():
-        if shown >= 50:
-            break
-        lines.append(f"  {cas_name}: html_files={stats['html_count']}, html_bytes={stats['html_bytes']:,} ({format_size(stats['html_bytes'])}), pdf_files={stats['pdf_count']}, pdf_bytes={stats['pdf_bytes']:,} ({format_size(stats['pdf_bytes'])}), xml_files={stats['xml_count']}, xml_bytes={stats['xml_bytes']:,} ({format_size(stats['xml_bytes'])})")
-        shown += 1
+    # lines.append("")
+    # lines.append("Per-CAS summary (first 50 entries shown):")
+    # shown = 0
+    # for cas_name, stats in per_cas_stats.items():
+    #     if shown >= 50:
+    #         break
+    #     lines.append(f"  {cas_name}: html_files={stats['html_count']}, html_bytes={stats['html_bytes']:,} ({format_size(stats['html_bytes'])}), pdf_files={stats['pdf_count']}, pdf_bytes={stats['pdf_bytes']:,} ({format_size(stats['pdf_bytes'])}), xml_files={stats['xml_count']}, xml_bytes={stats['xml_bytes']:,} ({format_size(stats['xml_bytes'])})")
+    #     shown += 1
 
     lines.append("")
     lines.append("End of report")
