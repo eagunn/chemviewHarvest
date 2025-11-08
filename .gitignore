@@ -14,6 +14,7 @@ __pycache__/
 
 # log files and debug artifacts
 *.log
+*.log.*
 debug_artifacts/
 
 # input and output files
