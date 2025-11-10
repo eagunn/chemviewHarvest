@@ -23,6 +23,7 @@ class Config:
     max_downloads: int = None  # if set, limit number of downloads made (not rows)
     start_row: int = None  # if set, skip rows up to this row number
     stop_file: str = "harvest.stop"  # optional stop-file; when present the harvest stops gracefully
+    retry_interval_hours: float = 12.0  # hours to wait after a failure before retrying
 
 # Initialize CONFIG with concrete type so static analyzers see its attributes
 CONFIG: Config = Config()
@@ -36,6 +37,9 @@ def initialize_config(argv):
     this thin wrapper so comments and CLI help remain colocated with this
     script. The heavy lifting (loop, DB, browser reuse) is delegated to the
     shared `harvest_framework` module.
+
+    New option:
+    --retry-interval-hours: float number of hours to wait after a recorded failure before retrying (default 12.0)
     """
     parser = argparse.ArgumentParser(description="Substantial Risk harvest script")
     parser.add_argument("--headless", action="store_true", help="Run headless (placeholder)")
@@ -47,6 +51,7 @@ def initialize_config(argv):
     parser.add_argument("--max-downloads", dest='max_downloads', type=int, help="Maximum number of download attempts to perform")
     parser.add_argument("--start-row", type=int, help="Start processing from this row number (1-based index)")
     parser.add_argument("--stop-file", dest='stop_file', type=str, help="Path to stop file (when present, harvest stops)")
+    parser.add_argument("--retry-interval-hours", dest='retry_interval_hours', type=float, help="Hours to wait after a failure before retrying (default 12.0)")
     args = parser.parse_args(argv)
 
     global CONFIG
@@ -59,6 +64,7 @@ def initialize_config(argv):
         max_downloads=args.max_downloads if args.max_downloads is not None else Config.max_downloads,
         start_row=args.start_row if args.start_row is not None else None,
         stop_file=args.stop_file if args.stop_file is not None else Config.stop_file,
+        retry_interval_hours=args.retry_interval_hours if args.retry_interval_hours is not None else Config.retry_interval_hours,
     )
     logging.info(f"Configuration initialized: {CONFIG}")
 

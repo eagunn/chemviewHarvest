@@ -165,6 +165,7 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
                 page=page,
                 db=db,
                 file_types=file_types,
+                retry_interval_hours=getattr(config, 'retry_interval_hours', 12.0),
             )
             end_time = time.perf_counter()
             elapsed = end_time - start_time
@@ -192,7 +193,8 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
                 logger.warning("PDF error for cas=%s: %s", cas_val, pdf_result.get('error'))
 
             # Heartbeat to console (keep this printed to console as before)
-            print(f"Row {total_rows}: cas={cas_val}, html_ok={html_result.get('success')}, pdf_ok={pdf_result.get('success')}, (processed {download_calls} of {config.max_downloads} so far)")
+            outOf = f" of {config.max_downloads}" if config.max_downloads is not None else ""
+            print(f"Row {total_rows}: cas={cas_val}, html_ok={html_result.get('success')}, pdf_ok={pdf_result.get('success')}, (processed {download_calls}{outOf})")
 
     finally:
         fh.close()

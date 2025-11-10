@@ -4,8 +4,6 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import logging
 from typing import Dict, Any, Optional
-
-from playwright.sync_api import sync_playwright
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import json
@@ -24,15 +22,17 @@ PDF_PLAN_OUT_DIR: Path = Path('pdfDownloadsToDo')
 PDF_PLAN_OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _need_download_from_db(db, cas_val: str, file_type: str) -> bool:
+def _need_download_from_db(db, cas_val: str, file_type: str, retry_interval_hours: float = 12.0) -> bool:
     """
     Policy:
     - If no record: return True
     - If record and last_success_datetime is not null: return False (do not retry if any success)
     - If record and last_success_datetime is null:
         - If last_failure_datetime is null: return True
-        - If last_failure_datetime is less than 24 hours ago: return False
-        - If last_failure_datetime is more than 24 hours ago: return True
+        - If last_failure_datetime is less than `retry_interval_hours` ago: return False
+        - If last_failure_datetime is more than `retry_interval_hours` ago: return True
+
+    retry_interval_hours: number of hours to wait after a failure before retrying (default 12.0)
     """
     record = None
     do_need_download = False
@@ -50,15 +50,20 @@ def _need_download_from_db(db, cas_val: str, file_type: str) -> bool:
         if last_success:
             logger.debug("Found prior success for %s / %s; no download needed", cas_val, file_type)
         else:
-        # If no success, check failure interval
+            # If no success, check failure interval
             if last_failure:
                 now = datetime.now()
-                last_failure_dt = datetime.fromisoformat(str(last_failure))
-                if now - last_failure_dt > timedelta(hours=24):
+                try:
+                    last_failure_dt = datetime.fromisoformat(str(last_failure))
+                except Exception:
+                    logger.exception("Failed to parse last_failure_datetime for %s / %s", cas_val, file_type)
+                    # conservative: do not retry if we can't parse the stored timestamp
+                    return False
+                if now - last_failure_dt > timedelta(hours=retry_interval_hours):
                     do_need_download = True
-                    logger.debug("Found old-enough  prior failure for %s / %s", cas_val, file_type)
+                    logger.debug("Found old-enough prior failure for %s / %s (threshold=%sh)", cas_val, file_type, retry_interval_hours)
                 else:
-                    logger.debug("Found too-new prior failure for %s / %s; no download needed", cas_val, file_type)
+                    logger.debug("Found too-new prior failure for %s / %s; no download needed (threshold=%sh)", cas_val, file_type, retry_interval_hours)
             else:
                 # no success, no failure -> need download
                 do_need_download = True
@@ -100,7 +105,6 @@ def add_pdf_links_to_plan(plan: Dict[str, Any], cas_dir: Path, pdf_links: list[s
     cas_entry = _ensure_cas_entry(plan, cas_folder_name)
     reports_sf = _ensure_reports_subfolder(cas_entry)
     existing = set(reports_sf.get('downloadList', []))
-    attempted = len(pdf_links)
     added = 0
     skipped_duplicates = 0
     for url in pdf_links:
@@ -129,9 +133,10 @@ def save_download_plan(plan: Dict[str, Any], debug_out: Path) -> Path:
     return out_path
 
 
-def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, file_types: Any = None) -> Dict[str, Any]:
+def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, file_types: Any = None, retry_interval_hours: float = 12.0) -> Dict[str, Any]:
     """Use DB to decide whether to attempt, then returns random outcomes and logs them to DB.
 
+    `retry_interval_hours` controls how long to wait after a recorded failure before retrying (default 12 hours).
     Returns a dict result, see structure below
     """
     result: Dict[str, Any] = {
@@ -155,8 +160,8 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
         result['pdf']['error'] = msg
         return result
 
-    need_html = _need_download_from_db(db, cas_val, file_types.substantial_risk_html)
-    need_pdf = _need_download_from_db(db, cas_val, file_types.substantial_risk_pdf)
+    need_html = _need_download_from_db(db, cas_val, file_types.substantial_risk_html, retry_interval_hours=retry_interval_hours)
+    need_pdf = _need_download_from_db(db, cas_val, file_types.substantial_risk_pdf, retry_interval_hours=retry_interval_hours)
 
     if not need_html and not need_pdf:
         logger.info("No downloads needed for cas=%s (substantial risk)", cas_val)
@@ -172,15 +177,6 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
     cas_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Start of processing for URL: %s", url)
-
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception as e:
-        msg = f"Playwright not available; cannot navigate to URL: {e}"
-        logger.error(msg)
-        result['html']['error'] = msg
-        result['pdf']['error'] = msg
-        return result
 
     if page is None:
         logger.error("No page provided for URL: %s", url)
@@ -260,7 +256,6 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
                     logger.exception("Failed to write failure to DB for html post-loop")
             if need_pdf:
                 if (result.get('pdf', {}).get('success') is True):
-                    msg = result.get('pdf', {}).get('error')
                     try:
                         db.log_success(cas_val, file_types.substantial_risk_pdf, result.get('pdf', {}).get('local_file_path'), result.get('pdf', {}).get('navigate_via'))
                     except Exception:
@@ -416,6 +411,7 @@ def click_anchor_link_and_wait_for_modal(page, sr_link):
 
 def find_submission_links_on_chemical_overview_modal(page):
     sr_link_list = []
+    summary_link_list = []
     # 1. Define the Locator for the specific anchors you want.
     # Playwright is smart enough to search only within the visible
     # modal if it's the only element matching this selector.
@@ -443,24 +439,18 @@ def find_submission_links_on_chemical_overview_modal(page):
             # The following was missing some anchors. Trying to be a bit less precise
             #if text.startswith("* TSCA \u00A7 8(e) Submission"):
             if text.startswith("* TSCA \u00A7 8(e) "):
-                # # Log key attributes to help trace which anchors map to which modals
-                # try:
-                #     a_attrs = {
-                #         'href': anchor.get_attribute('href'),
-                #         'data-target': anchor.get_attribute('data-target'),
-                #         'id': anchor.get_at tribute('id'),
-                #         'onclick': anchor.get_attribute('onclick'),
-                #         'text': text
-                #     }
-                #     logger.debug("SR anchor attributes: %s", a_attrs)
-                # except Exception:
-                #     logger.info("Found SR/8e link (attributes unavailable)")
-                logger.debug("Found SR/8e link")
+                logger.debug("Adding link to SR/8e list")
                 sr_link_list.append(anchor)
+            elif text != "":
+                logger.debug("Adding link to summary list")
+                summary_link_list.append(anchor)
+            else:
+                logger.debug("Skipping empty-text anchor")
         except Exception:
             logger.warning("Exception while processing anchor %d", i, exc_info=True)
             continue
-        logger.info(f"Found {len(sr_link_list)} SR/8e links on page")
+    logger.info(f"Found {len(sr_link_list)} SR/8e links on page")
+    logger.info(f"Found {len(summary_link_list)} summary links on page")
 
     return sr_link_list
 
@@ -492,7 +482,6 @@ def navigate_to_chemical_overview_modal(page, url: str) -> bool:
     # until the timeout (default 30s, or you can pass a custom timeout here).
     try:
         modal_locator = page.locator(selector)
-        # Explicitly wait for the modal content to be visible. This replaces page.wait_for_selector().
         modal_locator.wait_for(state="visible", timeout=15000)  # Use 15s wait for the modal
         logger.info("Modal content is present and visible.")
         return True
