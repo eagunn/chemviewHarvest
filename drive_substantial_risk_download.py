@@ -174,7 +174,7 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
     debug_out.mkdir(parents=True, exist_ok=True)
     if cas_dir is None:
         cas_dir = Path(".")
-    cas_dir.mkdir(parents=True, exist_ok=True)
+    # Note: do not create cas_dir here; caller (harvest_framework) is responsible for ensuring cas_dir exists
 
     logger.info("Start of processing for URL: %s", url)
 
@@ -196,41 +196,63 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
 
     # Use positive-test style: only proceed when nav_ok is True; otherwise record an error
     if nav_ok:
-        sr_link_list = find_submission_links_on_chemical_overview_modal(page)
+        sr_link_list, summary_link_list = find_anchor_links_on_chemical_overview_modal(page)
+         # Process Substantial Risk / 8e links which should each have PDFs to harvest
         if sr_link_list and len(sr_link_list) > 0:
-            # Iterate with an explicit 1-based index so we can number modal HTML files when there are multiple links
-            any_modal_processed = False
-            for idx, sr_link in enumerate(sr_link_list, start=1):
-                # Click the SR anchor and get back a locator for the modal that opened (or None on failure)
-                modal_locator = click_anchor_link_and_wait_for_modal(page, sr_link)
-                if modal_locator is None:
-                    logger.warning("Skipping SR link %d for cas %s because modal was not observed", idx, cas_val)
-                    continue
+             for idx, sr_link in enumerate(sr_link_list, start=1):
+                 # Click the SR anchor and get back a locator for the modal that opened (or None on failure)
+                 modal_locator = click_sr_anchor_link_and_wait_for_modal(page, sr_link)
+                 if modal_locator is None:
+                     logger.warning("Skipping SR link %d for cas %s because modal was not observed", idx, cas_val)
+                     continue
 
-                pdf_link_list = None
-                if need_html or need_pdf:
-                    # pass the modal locator (required) so the scraper uses the already-observed modal
-                    try:
-                        pdf_link_list = scrape_modal_html_and_gather_pdf_links(page, modal_locator, need_html, need_pdf, cas_dir, cas_val, db, file_types, url, result, item_no=idx)
-                    except Exception as e:
-                        logger.exception("Exception raised while scraping modal %d: %s", idx, e)
-                        # record processing failures
-                        result['pdf']['error'] = f"Exception while scraping modal {idx}: {e}"
+                 pdf_link_list = None
+                 if need_html or need_pdf:
+                     # pass the modal locator (required) so the scraper uses the already-observed modal
+                     try:
+                         pdf_link_list = scrape_sr_modal_html_and_gather_pdf_links(page, modal_locator, need_html, need_pdf, cas_dir, cas_val, db, file_types, url, result, item_no=idx)
+                     except Exception as e:
+                         logger.exception("Exception raised while scraping modal %d: %s", idx, e)
+                         # record processing failures
+                         result['pdf']['error'] = f"Exception while scraping modal {idx}: {e}"
 
-                if pdf_link_list:
-                    # Add discovered PDF links to the global accumulator (will be flushed to disk in batches)
-                    # For now we are simply trusting this to work and assuming success at this point.
-                    _accumulate_pdf_links_for_cas(cas_dir, pdf_link_list)
-                    result['pdf']['success'] = True
-                    result['pdf']['local_file_path'] = str(cas_dir / "substantialRiskReports")
-                    result['pdf']['navigate_via'] = url
-                # else: if we didn't find a list we are going to log this as a failure below
+                 if pdf_link_list:
+                     # Add discovered PDF links to the global accumulator (will be flushed to disk in batches)
+                     # For now we are simply trusting this to work and assuming success at this point.
+                     _accumulate_pdf_links_for_cas(cas_dir, pdf_link_list)
+                     result['pdf']['success'] = True
+                     result['pdf']['local_file_path'] = str(cas_dir / "substantialRiskReports")
+                     result['pdf']['navigate_via'] = url
+                 # else: if we didn't find a list we are going to log this as a failure below
         else:
             msg = "No Substantial Risk / 8e links found on initial page"
             logger.error(msg)
             result['html']['error'] = msg
             result['pdf']['error'] = msg
-            # do not return; caller will handle post-loop logging
+            # continue to try summary links anyway
+       # Process summary links (these open summary/table overlays; no PDFs expected)
+        if summary_link_list and len(summary_link_list) > 0:
+            for sidx, summary_anchor in enumerate(summary_link_list, start=1):
+                modal_locator = click_summary_anchor_link_and_wait_for_modal(page, summary_anchor)
+                if modal_locator is None:
+                    logger.warning("Skipping summary link %d for cas %s because modal was not observed", sidx, cas_val)
+                    continue
+                try:
+                    success = scrape_summary_modal_from_locator(modal_locator, cas_dir, cas_val, item_no=sidx)
+                    if success:
+                        logger.info("Saved summary modal %d for cas %s", sidx, cas_val)
+                    else:
+                        logger.warning("Failed to save summary modal %d for cas %s", sidx, cas_val)
+                        # TEMPORARY?
+                        # if a scrape fails, bag the rest of the sequence
+                        break
+                except Exception:
+                    logger.exception("Exception while processing summary modal %d for cas %s", sidx, cas_val)
+        else:
+            logger.debug("No summary links found on initial page (or none visible)")
+            # Note we're intentionally not recording this as an error.
+            # Not all overview modals have summary links.
+
     else:
         msg = "Navigation to chemical overview modal failed"
         logger.error(msg)
@@ -270,7 +292,7 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
 
     return result
 
-def scrape_modal_html_and_gather_pdf_links(
+def scrape_sr_modal_html_and_gather_pdf_links(
     page, modal_locator, need_html: bool, need_pdf: bool, cas_dir: Path, cas_val, db, file_types: Any, url: str, result: Dict[str, Any], item_no: int = 1
 ) -> Any:
     logger.info(f"Processing Substantial Risk Reports modal {item_no}...")
@@ -278,7 +300,6 @@ def scrape_modal_html_and_gather_pdf_links(
     try:
         # The modal locator is required and should reference the modal body (or container) that is open.
         modal = modal_locator
-
         # Extract identifier for logging/debugging
         modal_ident_raw = modal.get_attribute("id") or ""
         # Try to pull an identifier inside square brackets (e.g., '[8EHQ-07-16936]')
@@ -332,7 +353,7 @@ def scrape_modal_html_and_gather_pdf_links(
 
             pdf_link_list = []
             if need_pdf:
-                logger.info("Finding PDF download links in the modal")
+                logger.debug("Finding PDF download links in the modal")
                 pdf_anchors = modal.locator("li a.show_external_link")
                 pdf_link_list = pdf_anchors.evaluate_all("anchors => anchors.map(a => a.href)")
                 logger.info("Found %d PDF download links", len(pdf_link_list))
@@ -358,7 +379,7 @@ def scrape_modal_html_and_gather_pdf_links(
     return pdf_link_list
 
 
-def click_anchor_link_and_wait_for_modal(page, sr_link):
+def click_sr_anchor_link_and_wait_for_modal(page, sr_link):
     """
     Clicks the given SR anchor and waits robustly for the unique visible modal
     to appear and contain the expected content. Returns the Locator for the modal container.
@@ -409,7 +430,48 @@ def click_anchor_link_and_wait_for_modal(page, sr_link):
         logger.error("Error during final modal wait: %s", e)
         return None
 
-def find_submission_links_on_chemical_overview_modal(page):
+def click_summary_anchor_link_and_wait_for_modal(page, anchor, timeout: int = 10000):
+    """
+    Click the provided summary anchor and wait for the summary modal to appear.
+
+    Waits specifically for the element with id `viewAllEndpointBody` (based on sampleHtml.txt).
+    Returns the Locator for that element on success, or None on timeout/error.
+    """
+    if anchor is None:
+        logger.warning("No summary anchor provided to click_summary_anchor_link_and_wait_for_modal")
+        return None
+
+    # Try clicking via element handle first to avoid accidental double-open behavior
+    try:
+        try:
+            el_handle = anchor.element_handle()
+        except Exception:
+            el_handle = None
+        if el_handle is not None:
+            try:
+                el_handle.click()
+            except Exception:
+                # fallback to locator click
+                anchor.click()
+        else:
+            anchor.click()
+    except Exception as e:
+        logger.warning("Failed to click summary anchor: %s", e)
+        return None
+
+    # Wait for the summary modal body to appear
+    try:
+        summary_locator = page.locator('#viewAllEndpointBody')
+        summary_locator.wait_for(state='visible', timeout=timeout)
+        logger.info("Summary modal observed and ready")
+        return summary_locator
+    except Exception:
+        logger.debug("Summary modal not observed after clicking anchor", exc_info=True)
+        return None
+
+    # done
+
+def find_anchor_links_on_chemical_overview_modal(page):
     sr_link_list = []
     summary_link_list = []
     # 1. Define the Locator for the specific anchors you want.
@@ -435,24 +497,26 @@ def find_submission_links_on_chemical_overview_modal(page):
     for i, anchor in enumerate(anchors):
         try:
             text = anchor.inner_text().strip()
-            logger.debug("anchor text: %s", text)
-            # The following was missing some anchors. Trying to be a bit less precise
-            #if text.startswith("* TSCA \u00A7 8(e) Submission"):
-            if text.startswith("* TSCA \u00A7 8(e) "):
-                logger.debug("Adding link to SR/8e list")
-                sr_link_list.append(anchor)
-            elif text != "":
-                logger.debug("Adding link to summary list")
-                summary_link_list.append(anchor)
+            if text is not None:
+                logger.debug("anchor text: %s", text)
+                # Identify SR/8e links by text prefix
+                if text.startswith("* TSCA \u00A7 8(e) "):
+                    logger.debug("Found SR/8e link")
+                    sr_link_list.append(anchor)
+                elif text != "":
+                    logger.debug("Found summary link")
+                    summary_link_list.append(anchor)
+                else:
+                    logger.debug("Found blank anchor text; skipping")
             else:
-                logger.debug("Skipping empty-text anchor")
+                logger.debug("Anchor text is None; skipping")
         except Exception:
-            logger.warning("Exception while processing anchor %d", i, exc_info=True)
+            logger.exception("Exception while processing anchor %d", i)
             continue
-    logger.info(f"Found {len(sr_link_list)} SR/8e links on page")
-    logger.info(f"Found {len(summary_link_list)} summary links on page")
 
-    return sr_link_list
+    logger.info(f"Found {len(sr_link_list)} SR/8e links and {len(summary_link_list)} summary links on page")
+
+    return sr_link_list, summary_link_list
 
 
 def navigate_to_chemical_overview_modal(page, url: str) -> bool:
@@ -574,66 +638,154 @@ def download_pdfs(pdf_links: list[str], cas_dir: Path, session: Optional[request
             except Exception:
                 pass
 
-def scrape_summary_modal_and_save(page, anchor, cas_dir: Path, filename: str):
-    """Click the given anchor to open the summary overlay/modal, wait for #viewAllEndpointBody to be visible and populated,
-    capture the modal innerHTML, and save to cas_dir/filename.
-    Only use element_handle.click() for summary links to avoid double modal opening.
+# def scrape_summary_modal_and_save(page, anchor, cas_dir: Path, filename: str):
+#     """Click the given anchor to open the summary overlay/modal, wait for #viewAllEndpointBody to be visible and populated,
+#     capture the modal innerHTML, and save to cas_dir/filename.
+#     Only use element_handle.click() for summary links to avoid double modal opening.
+#     """
+#     # (no extra imports needed here)
+#     try:
+#         # Click the anchor using only element_handle.click() to avoid double modal opening
+#         try:
+#             anchor.click()
+#             logger.debug("Clicked summary anchor via element_handle.click()")
+#         except Exception as e:
+#             logger.warning("Failed to click summary anchor via element_handle.click(): %s", e)
+#             return False
+#
+#         # Wait for #viewAllEndpointBody to be visible and populated
+#         try:
+#             page.wait_for_selector('#viewAllEndpointBody', timeout=8000, state='visible')
+#             # Optionally, wait for a table or heading inside the modal to appear
+#             page.wait_for_function(
+#                 "() => { const el = document.getElementById('viewAllEndpointBody'); return el && el.offsetParent !== null && el.innerText.trim().length > 0; }",
+#                 timeout=4000
+#             )
+#             logger.debug("Summary modal #viewAllEndpointBody is visible and populated")
+#         except Exception:
+#             logger.debug("Summary modal #viewAllEndpointBody did not appear or populate within timeout; attempting to capture anyway")
+#
+#         # Capture the modal HTML
+#         try:
+#             modal = page.query_selector('#viewAllEndpointBody')
+#             if not modal:
+#                 logger.error("No #viewAllEndpointBody found to capture for filename %s", filename)
+#                 return False
+#             modal_html = modal.inner_html()
+#         except Exception as e:
+#             logger.error("Failed to get inner_html of #viewAllEndpointBody: %s", e)
+#             return False
+#
+#         # Ensure reports dir exists
+#         cas_dir.mkdir(parents=True, exist_ok=True)
+#         out_path = cas_dir / filename
+#         try:
+#             with open(out_path, 'w', encoding='utf-8') as fh:
+#                 fh.write(f"<div id='viewAllEndpointBody'>\n{modal_html}\n</div>")
+#             logger.info("Saved summary modal HTML to %s", out_path)
+#         except Exception as e:
+#             logger.error("Failed to write summary HTML to %s: %s", out_path, e)
+#             return False
+#
+#         # Attempt to close the summary modal (click .close button if present, or hide modal)
+#         try:
+#             closed = page.evaluate("() => { const el = document.getElementById('viewAllEndpointBody'); if(!el) return false; const modal = el.closest('.modal'); if(!modal) return false; const btn = modal.querySelector('.close'); if(btn){ btn.click(); return true;} modal.style.display='none'; return true; }")
+#             logger.debug("Attempted to close summary modal (result=%s)", closed)
+#         except Exception:
+#             logger.exception("Failed to close summary modal after saving HTML")
+#
+#         return True
+#     except Exception as e:
+#         logger.exception("Error scraping summary modal: %s", e)
+#         return False
+
+def scrape_summary_modal_from_locator(modal_locator, cas_dir: Path, cas_val, item_no: int = 1) -> bool:
+    """Capture the summary modal HTML using an already-open modal locator and save it to a file.
+
+    Use the hazard category (h5[data-bind*='endpointName']) when available to build the filename;
+    otherwise fall back to a sanitized modal id. Returns True on success, False otherwise.
+    Note: this function assumes the caller ensured `cas_dir` exists.
     """
-    # (no extra imports needed here)
+    logger.info(f"Processing Summary Risks modal {item_no} for CAS {cas_val}...")
     try:
-        # Click the anchor using only element_handle.click() to avoid double modal opening
-        try:
-            anchor.click()
-            logger.debug("Clicked summary anchor via element_handle.click()")
-        except Exception as e:
-            logger.warning("Failed to click summary anchor via element_handle.click(): %s", e)
-            return False
+        modal = modal_locator
 
-        # Wait for #viewAllEndpointBody to be visible and populated
+        # Expect to name the file after the hazard category (h5[data-bind*='endpointName']) when available
+        category_text = ''
         try:
-            page.wait_for_selector('#viewAllEndpointBody', timeout=8000, state='visible')
-            # Optionally, wait for a table or heading inside the modal to appear
-            page.wait_for_function(
-                "() => { const el = document.getElementById('viewAllEndpointBody'); return el && el.offsetParent !== null && el.innerText.trim().length > 0; }",
-                timeout=4000
-            )
-            logger.debug("Summary modal #viewAllEndpointBody is visible and populated")
+            hb = modal.locator("h5[data-bind*='endpointName']").first
+            if hb and hb.count() > 0:
+                try:
+                    category_text = hb.inner_text()
+                except Exception:
+                    try:
+                        category_text = hb.evaluate("el => (el.innerText || '').trim()") or ''
+                    except Exception:
+                        category_text = ''
         except Exception:
-            logger.debug("Summary modal #viewAllEndpointBody did not appear or populate within timeout; attempting to capture anyway")
+            category_text = ''
 
-        # Capture the modal HTML
+        if category_text:
+            category_text = category_text.strip().lower()
+        if category_text:
+            category_safe = re.sub(r"[^A-Za-z0-9\-_]", "_", category_text)
+            filename_base = f"{category_safe}"
+        else:
+            filename_base = f"hazard_summary_{item_no}"
+
+        # Capture the full modal container (including header with Close button) if possible
+        modal_outer_html = ''
         try:
-            modal = page.query_selector('#viewAllEndpointBody')
-            if not modal:
-                logger.error("No #viewAllEndpointBody found to capture for filename %s", filename)
-                return False
-            modal_html = modal.inner_html()
-        except Exception as e:
-            logger.error("Failed to get inner_html of #viewAllEndpointBody: %s", e)
+            modal_outer_html = modal.evaluate(
+                "el => { const c = el.closest('.modal-content') || el.closest('.modal') || el; return (c && c.outerHTML) || (el && el.outerHTML) || ''; }"
+            ) or ''
+        except Exception:
+            try:
+                modal_outer_html = modal.evaluate('el => el.outerHTML') or ''
+            except Exception:
+                try:
+                    modal_outer_html = modal.inner_html() or ''
+                except Exception:
+                    modal_outer_html = ''
+
+        if not modal_outer_html:
+            logger.warning("No HTML content captured for summary modal %s", item_no)
             return False
 
-        # Ensure reports dir exists
-        cas_dir.mkdir(parents=True, exist_ok=True)
-        out_path = cas_dir / filename
+        # Write the captured HTML to disk (caller ensures cas_dir exists)
+        out_path = cas_dir / f"{filename_base}.html"
+        logger.debug("Output path for modal will be: %s", out_path)
         try:
             with open(out_path, 'w', encoding='utf-8') as fh:
-                fh.write(f"<div id='viewAllEndpointBody'>\n{modal_html}\n</div>")
+                fh.write(modal_outer_html)
             logger.info("Saved summary modal HTML to %s", out_path)
         except Exception as e:
-            logger.error("Failed to write summary HTML to %s: %s", out_path, e)
+            logger.exception("Failed to write summary modal HTML to %s: %s", out_path, e)
             return False
 
-        # Attempt to close the summary modal (click .close button if present, or hide modal)
+        # Close the modal using a robust locator and auto-wait
         try:
-            closed = page.evaluate("() => { const el = document.getElementById('viewAllEndpointBody'); if(!el) return false; const modal = el.closest('.modal'); if(!modal) return false; const btn = modal.querySelector('.close'); if(btn){ btn.click(); return true;} modal.style.display='none'; return true; }")
-            logger.debug("Attempted to close summary modal (result=%s)", closed)
-        except Exception:
-            logger.exception("Failed to close summary modal after saving HTML")
-
+            # Traverse up from #viewAllEndpointBody to .modal-content
+            modal_container = modal.locator("..").locator("..")
+            close_btn = modal_container.locator("a.close[data-dismiss='modal']")
+            if close_btn and close_btn.count() > 0:
+                logger.debug("Will try to close summary modal via Playwright locator (from modal_container)")
+                close_btn.first.click()
+                modal_container.wait_for(state="hidden", timeout=5000)
+                logger.debug("Closed summary modal successfully")
+            else:
+                logger.error(f"Close button not found in summary modal {item_no}; cannot close modal.")
+                return False  # hard failure: do not continue
+        except Exception as e:
+            logger.exception("Failed to close summary modal %s after saving HTML", item_no)
+            # TEMPORARY? If we can't close a modal, we may be hosed for the duration.
+            # In any case, for testing, bag it here.
+            return False # hard failure: do not continue
         return True
-    except Exception as e:
-        logger.exception("Error scraping summary modal: %s", e)
+    except Exception:
+        logger.exception("Unexpected error capturing summary modal for CAS %s", cas_val)
         return False
+    # done
 
 def _flush_pdf_plan_accum(force: bool = False):
     """Write the accumulated PDF plan to a timestamped JSON file in `pdfDownloadsToDo` and reset the accumulator.

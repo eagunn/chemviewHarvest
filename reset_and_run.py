@@ -19,8 +19,9 @@ def run_harvest_script():
             'python',
             './harvestSubstantialRisk.py',
             '--headless',
-            '--input-file', './input_files/srExportTest1.csv',
-            '--max-downloads', '3'
+            #'--input-file', './input_files/srExportTest1.csv',
+            '--start-row', '214',
+            '--max-downloads', '1'
         ]
         print("About to execute command:", ' '.join(command))
         subprocess.run(command, check=True)
