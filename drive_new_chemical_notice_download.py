@@ -10,127 +10,20 @@ import json
 from datetime import datetime, timedelta
 import atexit
 import re
+import HarvestDB
+import pdf_plan
 
 logger = logging.getLogger(__name__)
 
-# Module-level accumulator for download plans so we can write one JSON per N CAS entries
-PDF_PLAN_ACCUM: Dict[str, Any] = {'folder': 'chemview_archive_ncn', 'subfolderList': [], 'downloadList': []}
-PDF_PLAN_ACCUM_CAS_SET: set = set()
-PDF_PLAN_ACCUM_CAS_SINCE_WRITE: int = 0
-PDF_PLAN_WRITE_BATCH_SIZE: int = 25
-PDF_PLAN_OUT_DIR: Path = Path('pdfDownloadsToDo')
-PDF_PLAN_OUT_DIR.mkdir(parents=True, exist_ok=True)
+# Initialize shared PDF plan module for this driver. The folder name is the only
+# driver-specific configuration required here; other drivers may call pdf_plan.init
+# with a different folder if needed.
+pdf_plan.init(folder='chemview_archive_ncn', out_dir=Path('pdfDownloadsToDo'), batch_size=25)
 
+add_pdf_links_to_plan = pdf_plan.add_pdf_links_to_plan
+save_download_plan = pdf_plan.save_download_plan
+flush_pdf_plan = pdf_plan.flush
 
-def _need_download_from_db(db, cas_val: str, file_type: str, retry_interval_hours: float = 12.0) -> bool:
-    """
-    Policy:
-    - If no record: return True
-    - If record and last_success_datetime is not null: return False (do not retry if any success)
-    - If record and last_success_datetime is null:
-        - If last_failure_datetime is null: return True
-        - If last_failure_datetime is less than `retry_interval_hours` ago: return False
-        - If last_failure_datetime is more than `retry_interval_hours` ago: return True
-
-    retry_interval_hours: number of hours to wait after a failure before retrying (default 12.0)
-    """
-    record = None
-    do_need_download = False
-    try:
-        record = db.get_harvest_status(cas_val, file_type)
-    except Exception:
-        logger.exception("DB read failed when checking need for %s / %s", cas_val, file_type)
-        # If we can't read the db, we don't want to be doing downloads.
-        # We'll return the false set above
-
-    if record:
-        last_success = record.get('last_success_datetime')
-        last_failure = record.get('last_failure_datetime')
-        # If any success is recorded, do not retry
-        if last_success:
-            logger.debug("Found prior success for %s / %s; no download needed", cas_val, file_type)
-        else:
-            # If no success, check failure interval
-            if last_failure:
-                now = datetime.now()
-                try:
-                    last_failure_dt = datetime.fromisoformat(str(last_failure))
-                except Exception:
-                    logger.exception("Failed to parse last_failure_datetime for %s / %s", cas_val, file_type)
-                    # conservative: do not retry if we can't parse the stored timestamp
-                    return False
-                if now - last_failure_dt > timedelta(hours=retry_interval_hours):
-                    do_need_download = True
-                    logger.debug("Found old-enough prior failure for %s / %s (threshold=%sh)", cas_val, file_type, retry_interval_hours)
-                else:
-                    logger.debug("Found too-new prior failure for %s / %s; no download needed (threshold=%sh)", cas_val, file_type, retry_interval_hours)
-            else:
-                # no success, no failure -> need download
-                do_need_download = True
-    else:
-        # no record -> need download
-        do_need_download = True
-    return do_need_download
-
-
-# --- helpers for building and saving a per-run JSON download plan ---
-
-def _ensure_cas_entry(plan: Dict[str, Any], cas_folder_name: str) -> Dict[str, Any]:
-    """Return or create a cas entry dict inside plan['subfolderList']."""
-    for entry in plan.get('subfolderList', []):
-        if entry.get('folder') == cas_folder_name:
-            return entry
-    new_entry = {'folder': cas_folder_name, 'subfolderList': [], 'downloadList': []}
-    plan.setdefault('subfolderList', []).append(new_entry)
-    return new_entry
-
-
-def _ensure_reports_subfolder(cas_entry: Dict[str, Any], reports_name: str = 'substantialRiskReports') -> Dict[str, Any]:
-    """Return or create the reports subfolder dict inside a cas_entry."""
-    for sf in cas_entry.get('subfolderList', []):
-        if sf.get('folder') == reports_name:
-            return sf
-    new_sf = {'folder': reports_name, 'subfolderList': [], 'downloadList': []}
-    cas_entry.setdefault('subfolderList', []).append(new_sf)
-    return new_sf
-
-
-def add_pdf_links_to_plan(plan: Dict[str, Any], cas_dir: Path, pdf_links: list[str]):
-    """Add pdf_links to the nested plan structure under the cas_dir name and substantialRiskReports subfolder.
-    Duplicate URLs are ignored.
-    """
-    if not pdf_links:
-        return
-    cas_folder_name = cas_dir.name
-    cas_entry = _ensure_cas_entry(plan, cas_folder_name)
-    reports_sf = _ensure_reports_subfolder(cas_entry)
-    existing = set(reports_sf.get('downloadList', []))
-    added = 0
-    skipped_duplicates = 0
-    for url in pdf_links:
-        if not url:
-            continue
-        if url in existing:
-            skipped_duplicates += 1
-            continue
-        reports_sf.setdefault('downloadList', []).append(url)
-        existing.add(url)
-        added += 1
-
-
-
-def save_download_plan(plan: Dict[str, Any], debug_out: Path) -> Path:
-    """Write the plan to a timestamped JSON file in debug_out and return the path."""
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"pdfDownloads_{ts}.json"
-    out_path = Path(debug_out) / filename
-    try:
-        with open(out_path, 'w', encoding='utf-8') as fh:
-            json.dump(plan, fh, indent=2)
-        logger.info("Saved PDF download plan to %s", out_path)
-    except Exception as e:
-        logger.exception("Failed to save pdf download plan to %s: %s", out_path, e)
-    return out_path
 
 def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, file_types: Any = None, retry_interval_hours: float = 12.0) -> Dict[str, Any]:
     """ Walk the browser through the web pages and modals we need to capture
@@ -157,8 +50,8 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
         result['pdf']['error'] = msg
         return result
 
-    need_html = _need_download_from_db(db, cas_val, file_types.new_chemical_notice_html, retry_interval_hours=retry_interval_hours)
-    need_pdf = _need_download_from_db(db, cas_val, file_types.new_chemical_notice_pdf, retry_interval_hours=retry_interval_hours)
+    need_html = db.need_download(cas_val, file_types.new_chemical_notice_html, retry_interval_hours=retry_interval_hours)
+    need_pdf = db.need_download(cas_val, file_types.new_chemical_notice_pdf, retry_interval_hours=retry_interval_hours)
 
     if not need_html and not need_pdf:
         logger.info("No downloads needed for cas=%s (substantial risk)", cas_val)
@@ -190,7 +83,42 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
     # but will need to set 'success' to True on completed, confirmed successes.
 
     nav_ok = navigate_to_chemical_overview_modal(page, url)
-    input("Press Enter after verifying the modal is open...")
+    if nav_ok:
+        ncn_list = find_anchor_links_on_chemical_overview_modal(page)
+         # Process ncn links which should each have a modal and some PDFs to harvest
+        if ncn_list and len(ncn_list) > 0:
+             for idx, ncn_link in enumerate(ncn_list, start=1):
+                 # Click the ncn anchor and get back a locator for the modal that opened (or None on failure)
+                 modal_locator = click_ncn_anchor_link_and_wait_for_modal(page, ncn_link)
+                 if modal_locator is None:
+                     logger.warning("Skipping ncn link %d for cas %s because modal was not observed", idx, cas_val)
+                     continue
+
+                 pdf_link_list = None
+                 if need_html or need_pdf:
+                     # pass the modal locator (required) so the scraper uses the already-observed modal
+                     try:
+                         pdf_link_list = scrape_ncn_modal_html_and_gather_pdf_links(page, modal_locator, need_html, need_pdf, cas_dir, cas_val, db, file_types, url, result, item_no=idx)
+                     except Exception as e:
+                         logger.exception("Exception raised while scraping modal %d: %s", idx, e)
+                         # record processing failures
+                         result['pdf']['error'] = f"Exception while scraping modal {idx}: {e}"
+
+                 if pdf_link_list:
+                     # Add discovered PDF links to the global accumulator (will be flushed to disk in batches)
+                     # For now we are simply trusting this to work and assuming success at this point.
+                     ############## TEMPORARY - reenable!!!
+                     #_accumulate_pdf_links_for_cas(cas_dir, pdf_link_list)
+                     result['pdf']['success'] = True
+                     result['pdf']['local_file_path'] = str(cas_dir / "substantialRiskReports")
+                     result['pdf']['navigate_via'] = url
+                 # else: if we didn't find a list we are going to log this as a failure below
+        else:
+            msg = "No NCN links found on initial page"
+            logger.error(msg)
+            result['html']['error'] = msg
+            result['pdf']['error'] = msg
+
 
     # Post-loop: if we attempted processing then log failures for any file types that were explicitly set to False
     if result.get('attempted'):
@@ -225,6 +153,103 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
         logger.debug("No downloads attempted.")
 
     return result
+
+
+def click_ncn_anchor_link_and_wait_for_modal(page, ncn_link):
+    """
+    Clicks the given SR anchor and waits robustly for the unique visible modal
+    to appear and contain the expected content. Returns the Locator for the modal container.
+    """
+    if ncn_link is None:
+        logger.warning("No NCN link passed to click_anchor_link_and_wait_for_modal")
+        return None
+
+    # --- 1. Click the Anchor ---
+    try:
+        ncn_link.click(timeout=30000)
+        logger.debug("Clicked anchor via locator.click()")
+    except TimeoutError:
+        logger.warning("Failed to click anchor within 30s timeout.")
+        return None
+    except Exception as e:
+        logger.warning("Failed to click anchor due to unexpected error: %s", e)
+        return None
+
+    # --- 2. Define the Target Modal Locator (Simplified) ---
+
+    # We rely on the core Bootstrap/CSS classes to find the *unique* visible modal.
+    # We remove ALL complex logic involving data-target/href derivation, modal_id,
+    # and CSS.escape, as this was the source of the failure.
+    visible_modal_locator = page.locator("div.modal.show, div.modal.in")
+
+    # --- 3. Wait for Modal and Expected Content ---
+
+    # Define the locator for the critical content (PDF anchors) *inside* the visible modal.
+    # This guarantees the modal has opened AND has finished populating its dynamic content.
+    final_content_locator = visible_modal_locator.locator("li a.show_external_link")
+
+    try:
+        # Wait for the first PDF anchor to be visible inside the target modal.
+        final_content_locator.first.wait_for(state="visible", timeout=20000)
+
+        # Now that we know the content is loaded and the correct modal is up,
+        # we return the unique visible modal's locator.
+        logger.info("New modal observed and content verified.")
+
+        # We can safely return the simplified locator for the visible modal container.
+        return visible_modal_locator
+
+    except TimeoutError:
+        logger.warning("Timed out waiting for new modal to open and contain expected PDF anchor content after 20s.")
+        return None
+    except Exception as e:
+        logger.error("Error during final modal wait: %s", e)
+        return None
+
+def find_anchor_links_on_chemical_overview_modal(page):
+    ncn_link_list = []
+    # 1. Define the Locator for the specific anchors you want.
+    # Playwright is smart enough to search only within the visible
+    # modal if it's the only element matching this selector.
+    anchors_locator = page.locator('div#chemical-detail-modal-body a[href]')
+    anchors = []
+    try:
+        # 2. Explicitly wait for the *first* matching anchor to be visible.
+        # 8 second wait has been maximum needed when logs are reviewed.
+        anchors_locator.first.wait_for(state="visible", timeout=8000)
+        # 3. Once at least one is visible, retrieve all matching Locators.
+        # Note: .all() returns a list of Locators, ready for iteration.
+        anchors = anchors_locator.all()
+    except TimeoutError:
+        # Handle the case where the element never appears within the timeout
+        logger.warning("Timeout: No href anchors appeared before timeout.")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while waiting for anchors: {e}")
+
+    # Continue with your logic using the 'anchors' list
+    logger.debug("Found %d href anchors on page", len(anchors))
+    for i, anchor in enumerate(anchors):
+        try:
+            text = anchor.inner_text().strip()
+            if text is not None:
+                logger.debug("examining anchor text: %s", text)
+                # Identify SR/8e links by text prefix
+                if text.startswith("New Chemical Notice"):
+                    logger.debug("Found ncn link")
+                    ncn_link_list.append(anchor)
+                elif text != "":
+                    logger.warning("Found unexpected non-blank link")
+                else:
+                    logger.debug("Found blank anchor text; skipping")
+            else:
+                logger.debug("Anchor text is None; skipping")
+        except Exception:
+            logger.exception("Exception while processing anchor %d", i)
+            continue
+
+    logger.info(f"Found {len(ncn_link_list)} NCN links on page")
+
+    return ncn_link_list
 
 
 def navigate_to_chemical_overview_modal(page, url: str) -> bool:

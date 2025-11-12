@@ -10,7 +10,7 @@
 # worked out in Gemini, overseen and tested by AG
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple
 import logging
 from file_types import FileTypes
@@ -134,6 +134,99 @@ class HarvestDB:
             logger.error("Error deleting success records for chemical_id %s: %s", chemical_id, e, exc_info=True)
             return False
 
+    def need_download(self, chemical_id: str, file_type: str, retry_interval_hours: float = 12.0) -> bool:
+        """
+        Determine whether a download should be attempted for the given chemical_id and file_type.
+
+        Policy:
+        - If no record exists: return True
+        - If a record has last_success_datetime (any success): return False
+        - If no last_success and no last_failure: return True
+        - If last_failure is within retry_interval_hours: return False
+        - Otherwise return True (old failure)
+        """
+        record = self.get_harvest_status(chemical_id, file_type)
+        if not record:
+            logger.debug("No record found for %s / %s; download needed", chemical_id, file_type)
+            return True
+
+        last_success = record.get('last_success_datetime')
+        last_failure = record.get('last_failure_datetime')
+
+        if last_success:
+            logger.debug("Found prior success for %s / %s; no download needed", chemical_id, file_type)
+            return False
+
+        if not last_failure:
+            logger.debug("No prior failure recorded for %s / %s; download needed", chemical_id, file_type)
+            return True
+
+        # Parse the stored failure datetime. The DB stores strings using DATE_FORMAT.
+        try:
+            if isinstance(last_failure, str):
+                last_failure_dt = datetime.strptime(last_failure, DATE_FORMAT)
+            else:
+                last_failure_dt = last_failure
+        except Exception:
+            logger.exception("Failed to parse last_failure_datetime for %s / %s", chemical_id, file_type)
+            # conservative: if we can't parse the timestamp, do not retry
+            return False
+
+        if datetime.now() - last_failure_dt > timedelta(hours=retry_interval_hours):
+            logger.debug("Prior failure for %s / %s is older than threshold; download needed", chemical_id, file_type)
+            return True
+
+        logger.debug("Prior failure for %s / %s is too recent; skipping download", chemical_id, file_type)
+        return False
+
+
+# Module-level helper for backwards-compatible calls. Accepts either:
+# - a HarvestDB instance
+# - an object exposing get_harvest_status(chemical_id, file_type)
+# - a path to the sqlite DB file (str)
+def need_download_from_db(db_backend: Optional[Any], chemical_id: str, file_type: str, retry_interval_hours: float = 12.0) -> bool:
+    if db_backend is None:
+        logger.error("need_download_from_db called with no db_backend")
+        return False
+
+    # If caller passed a HarvestDB instance, delegate directly
+    if isinstance(db_backend, HarvestDB):
+        try:
+            return db_backend.need_download(chemical_id, file_type, retry_interval_hours)
+        except Exception:
+            logger.exception("HarvestDB.need_download raised an exception")
+            return False
+
+    # If the backend exposes get_harvest_status, use it directly
+    if hasattr(db_backend, 'get_harvest_status') and callable(getattr(db_backend, 'get_harvest_status')):
+        try:
+            record = db_backend.get_harvest_status(chemical_id, file_type)
+        except Exception:
+            logger.exception("DB read failed when checking need for %s / %s", chemical_id, file_type)
+            return False
+
+        if not record:
+            return True
+        if record.get('last_success_datetime'):
+            return False
+        if not record.get('last_failure_datetime'):
+            return True
+        try:
+            lf = record.get('last_failure_datetime')
+            last_failure_dt = datetime.strptime(lf, DATE_FORMAT) if isinstance(lf, str) else lf
+        except Exception:
+            logger.exception("Failed to parse last_failure_datetime for %s / %s", chemical_id, file_type)
+            return False
+        return datetime.now() - last_failure_dt > timedelta(hours=retry_interval_hours)
+
+    # Otherwise assume db_backend is a path to the sqlite DB file
+    try:
+        tmp = HarvestDB(db_backend)
+        return tmp.need_download(chemical_id, file_type, retry_interval_hours)
+    except Exception:
+        logger.exception("Failed to instantiate HarvestDB from db_backend; cannot determine need_download")
+        return False
+
 
 # --- Example Usage (Demonstration) ---
 if __name__ == "__main__":
@@ -168,3 +261,22 @@ if __name__ == "__main__":
     db.delete_success_records(test_id)
     status = db.get_harvest_status(test_id, test_file_type)
     logger.info("Status after deleting success records: %s", status)
+
+    logger.info("--- 6. Check Need for Download ---")
+    # This will use the need_download method
+    need_download = db.need_download(test_id, test_file_type)
+    logger.info("Need download (after success and failure): %s", need_download)
+
+    logger.info("--- 7. Log Failure, then Check Need Download ---")
+    db.log_failure(test_id, test_file_type, "somewhere")
+    need_download = db.need_download(test_id, test_file_type)
+    logger.info("Need download (after failure): %s", need_download)
+
+    logger.info("--- 8. Wait and Retry Logic ---")
+    # Simulate waiting by manually adjusting the last_failure_datetime
+    future_time = (datetime.now() - timedelta(hours=13)).strftime(DATE_FORMAT)
+    db.log_failure(test_id, test_file_type, "somewhere")
+    db._execute_query(f"UPDATE {TABLE_NAME} SET last_failure_datetime = ? WHERE chemical_id = ? AND file_type = ?", (future_time, test_id, test_file_type))
+    need_download = db.need_download(test_id, test_file_type)
+    logger.info("Need download (after adjusting time): %s", need_download)
+
