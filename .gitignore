@@ -27,10 +27,13 @@ harvest.stop
 # database files don't go in the repo for now
 *.db
 
-# report files 
+# report and other output files 
 *.txt
+*.out
 
 # miscellany
 modal_population_resilience.md
 aiTests/
 oldStuff/
+sampleOrganizations.*
+sampleOrganizations/
