@@ -88,21 +88,23 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
          # Process ncn links which should each have a modal and some PDFs to harvest
         if ncn_list and len(ncn_list) > 0:
              for idx, ncn_link in enumerate(ncn_list, start=1):
-                 # Click the ncn anchor and get back a locator for the modal that opened (or None on failure)
-                 modal_locator = click_ncn_anchor_link_and_wait_for_modal(page, ncn_link)
-                 if modal_locator is None:
-                     logger.warning("Skipping ncn link %d for cas %s because modal was not observed", idx, cas_val)
-                     continue
-
-                 pdf_link_list = None
-                 if need_html or need_pdf:
-                     # pass the modal locator (required) so the scraper uses the already-observed modal
-                     try:
-                         pdf_link_list = scrape_ncn_modal_html_and_gather_pdf_links(page, modal_locator, need_html, need_pdf, cas_dir, cas_val, db, file_types, url, result, item_no=idx)
-                     except Exception as e:
-                         logger.exception("Exception raised while scraping modal %d: %s", idx, e)
-                         # record processing failures
-                         result['pdf']['error'] = f"Exception while scraping modal {idx}: {e}"
+                 # Scrape the modal and get the zip download links
+                 pdf_link_list = []
+                 # TODO: rename this function to indicate actual behavior
+                 pdf_link_list = click_ncn_anchor_link_and_wait_for_modal(page, ncn_link)
+                #  if modal_locator is None:
+                #      logger.warning("Skipping ncn link %d for cas %s because modal was not observed", idx, cas_val)
+                #      continue
+                # # Note: the pdfs we want to download are inside zip files, let's keep the pdf variables for now.
+                #  pdf_link_list = None
+                #  if need_html or need_pdf:
+                #      # pass the modal locator (required) so the scraper uses the already-observed modal
+                #      try:
+                #          pdf_link_list = scrape_ncn_modal_html_and_gather_pdf_links(page, modal_locator, zip_locator, need_html, need_pdf, cas_dir, cas_val, db, file_types, url, result, item_no=idx)
+                #      except Exception as e:
+                #          logger.exception("Exception raised while scraping modal %d: %s", idx, e)
+                #          # record processing failures
+                #          result['pdf']['error'] = f"Exception while scraping modal {idx}: {e}"
 
                  if pdf_link_list:
                      # Add discovered PDF links to the global accumulator (will be flushed to disk in batches)
@@ -155,56 +157,169 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
     return result
 
 
-def click_ncn_anchor_link_and_wait_for_modal(page, ncn_link):
+# def scrape_ncn_modal_html_and_gather_pdf_links(
+#     page, modal_locator, zip_locator, need_html: bool, need_pdf: bool, cas_dir: Path, cas_val, db, file_types: Any, url: str, result: Dict[str, Any], item_no: int = 1
+# ) -> Any:
+#     logger.info(f"Processing New Chemical Notice modal {item_no}...")
+#     pdf_link_list = None
+#     try:
+#         # The modal locator is required and should reference the modal body (or container) that is open.
+#         modal = modal_locator
+#         # Extract identifier for logging/debugging
+#         modal_ident_raw = modal.get_attribute("id") or ""
+#         # Try to pull an identifier inside square brackets (e.g., '[8EHQ-07-16936]')
+#         m = re.search(r"\[([^]]+)]", modal_ident_raw)
+#         if m:
+#             modal_ident = m.group(1)
+#         else:
+#             # fallback to the raw id or use the item number
+#             modal_ident = modal_ident_raw or f"item_{item_no}"
+#
+#         # Sanitize identifier for use as a filename: keep letters, digits, hyphen, underscore
+#         modal_ident_safe = re.sub(r"[^A-Za-z0-9\-_]", "_", modal_ident)
+#         logger.info("Processing modal with id: %s (sanitized: %s)", modal_ident_raw, modal_ident_safe)
+#
+#         # Capture the modal-body.action div (outer HTML) if present; otherwise fall back to modal.inner_html()
+#         modal_body_html = None
+#         try:
+#             body_locator = modal.locator("div.modal-body.action").first
+#             # Ensure it exists and grab outerHTML
+#             if body_locator and body_locator.count() > 0:
+#                 logger.debug("Found expected body locator inside modal")
+#                 try:
+#                     modal_body_html = body_locator.evaluate("el => el.outerHTML")
+#                 except Exception:
+#                     # fallback to inner_html wrapped
+#                     inner = body_locator.inner_html()
+#                     modal_body_html = f"<div class='modal-body action'>\n{inner}\n</div>"
+#         except Exception:
+#             modal_body_html = None
+#             result['html']['error'] = "Failed to locate modal body div"
+#
+#         if modal_body_html is None:
+#             # final fallback: capture the modal's inner HTML and wrap it
+#             logger.warning("Did not find expected body locator; falling back to modal inner_html()")
+#             try:
+#                 modal_html = modal.inner_html()
+#                 modal_body_html = f"<div class='modal-body action'>\n{modal_html}\n</div>"
+#             except Exception:
+#                 modal_body_html = ""
+#
+#         if modal_body_html is not None and modal_body_html != "":
+#             if need_html:
+#                 logger.info("Saving modal HTML")
+#                 html_path = cas_dir / f"sr_{modal_ident_safe}.html"
+#                 with open(html_path, 'w', encoding='utf-8') as fh:
+#                     fh.write(modal_body_html)
+#                 logger.info("Saved modal HTML to %s", html_path)
+#                 result['html']['success'] = True
+#                 result['html']['local_file_path'] = str(html_path)
+#                 result['html']['navigate_via'] = url
+#
+#             pdf_link_list = []
+#             if need_pdf:
+#                 logger.debug("Finding PDF download links in the modal")
+#                 pdf_anchors = modal.locator("li a.show_external_link")
+#                 pdf_link_list = pdf_anchors.evaluate_all("anchors => anchors.map(a => a.href)")
+#                 logger.info("Found %d PDF download links", len(pdf_link_list))
+#                 # result success will be declared / filled-in by the caller after values are written to json file
+#
+#             # Close the modal using a robust locator and auto-wait
+#             close_btn = modal.locator("a.close[data-dismiss='modal']")
+#             if close_btn is not None:
+#                 logger.debug("Will try to close modal")
+#                 close_btn.click()
+#                 modal.wait_for(state="hidden", timeout=5000)
+#                 logger.debug("Closed modal successfully")
+#             else:
+#                 logger.warning("Close button not found in modal; skipping close")
+#
+#         return pdf_link_list
+#
+#     except Exception as e:
+#         logger.exception("Error while processing the modal: %s", e)
+#         result['html']['error'] = f"Exception while processing modal: {e}"
+#         result['pdf']['error'] = f"Exception while processing modal: {e}"
+#
+#     return pdf_link_list
+
+
+def click_ncn_anchor_link_and_wait_for_modal(page, ncn_link, need_pdf=None):
     """
-    Clicks the given SR anchor and waits robustly for the unique visible modal
-    to appear and contain the expected content. Returns the Locator for the modal container.
+    Clicks the given NCN anchor and waits robustly for the unique visible modal
+    to appear and contain the expected content. Returns a Locator for the modal container
+    or None on failure.
     """
     if ncn_link is None:
         logger.warning("No NCN link passed to click_anchor_link_and_wait_for_modal")
         return None
 
-    # --- 1. Click the Anchor ---
+    # --- 1. Click the anchor to bring up the specfic report modal ---
     try:
+        # Use Playwright auto-waiting click on the Locator
         ncn_link.click(timeout=30000)
-        logger.debug("Clicked anchor via locator.click()")
+        logger.debug("Clicked NCN link via locator.click()")
     except TimeoutError:
-        logger.warning("Failed to click anchor within 30s timeout.")
+        logger.warning("Failed to click NCN anchor within 30s timeout.")
         return None
     except Exception as e:
-        logger.warning("Failed to click anchor due to unexpected error: %s", e)
+        logger.warning("Failed to click NCN anchor: %s", e)
         return None
 
-    # --- 2. Define the Target Modal Locator (Simplified) ---
-
-    # We rely on the core Bootstrap/CSS classes to find the *unique* visible modal.
-    # We remove ALL complex logic involving data-target/href derivation, modal_id,
-    # and CSS.escape, as this was the source of the failure.
-    visible_modal_locator = page.locator("div.modal.show, div.modal.in")
-
-    # --- 3. Wait for Modal and Expected Content ---
-
-    # Define the locator for the critical content (PDF anchors) *inside* the visible modal.
-    # This guarantees the modal has opened AND has finished populating its dynamic content.
-    final_content_locator = visible_modal_locator.locator("li a.show_external_link")
-
+    # --- 2. Wait for the content we care about (the modal and the first zip download anchor) to become visible ---
+    # python
+    # Replace the existing \"Wait for the content we care about\" block in `click_ncn_anchor_link_and_wait_for_modal`
+    zip_locator = None
     try:
-        # Wait for the first PDF anchor to be visible inside the target modal.
-        final_content_locator.first.wait_for(state="visible", timeout=20000)
-
-        # Now that we know the content is loaded and the correct modal is up,
-        # we return the unique visible modal's locator.
-        logger.info("New modal observed and content verified.")
-
-        # We can safely return the simplified locator for the visible modal container.
-        return visible_modal_locator
-
+        # Prefer a visible modal container (Bootstrap commonly adds 'show' or older 'in')
+        visible_modal_locator = page.locator(
+            'div.modal.show div.modal-body.action, div.modal.in div.modal-body.action').first
+        # Wait briefly for it to become visible (raises on timeout)
+        visible_modal_locator.wait_for(state="visible", timeout=5000)
+        logger.debug("found visible modal-body.action via preferred selector")
+        # Limit anchors to those with the exact visible text we care about to avoid hidden duplicates
+        zip_locator = visible_modal_locator.locator('li a', has_text=" (Download zip)")
+        logger.debug("Zip locator count: %d", zip_locator.count())
+        zip_locator.first.wait_for(state="visible", timeout=20000)
     except TimeoutError:
-        logger.warning("Timed out waiting for new modal to open and contain expected PDF anchor content after 20s.")
+        logger.warning("Timed out waiting for zip anchor to appear after clicking anchor.")
         return None
     except Exception as e:
-        logger.error("Error during final modal wait: %s", e)
+        logger.warning("Error waiting for zip anchor to appear after clicking anchor: %s", e)
         return None
+
+    #return visible_modal_locator, zip_locator
+
+    # TODO: pull the notice number out of the html to use for the html filename
+    # </strong><span id="Notice_Number">L-20-0125</span>
+    # then sanitize it for use as a filename
+
+    # TODO: extract the html from visible_modal_locator and save it to a file named
+    # ncn_<notice_number>.html in the cas_dir
+
+    zip_link_list = []
+    if need_pdf and zip_locator is not None:
+        logger.debug("Finding ZIP download links in the modal")
+        zip_link_list = zip_locator.evaluate_all("anchors => anchors.map(a => a.href)")
+        logger.info("Found %d ZIP download links", len(zip_link_list))
+        # result success will be declared / filled-in by the caller after values are written to json file
+
+    # Close the modal using a robust locator and auto-wait
+    # Close button resides in a sibling div to modal-body, so navigate up to modal-content first
+    outer_content_locator = visible_modal_locator.locator(
+        'xpath=ancestor::div[contains(@class, "modal-content")]').first
+
+    close_btn = outer_content_locator.locator("a.close[data-dismiss='modal']").first
+    if close_btn is not None:
+        logger.debug("Will try to close modal")
+        close_btn.click()
+        visible_modal_locator.wait_for(state="hidden", timeout=5000)
+        logger.debug("Closed modal successfully")
+    else:
+        logger.warning("Close button not found in modal; skipping close")
+
+    return zip_link_list
+
 
 def find_anchor_links_on_chemical_overview_modal(page):
     ncn_link_list = []
@@ -215,7 +330,6 @@ def find_anchor_links_on_chemical_overview_modal(page):
     anchors = []
     try:
         # 2. Explicitly wait for the *first* matching anchor to be visible.
-        # 8 second wait has been maximum needed when logs are reviewed.
         anchors_locator.first.wait_for(state="visible", timeout=8000)
         # 3. Once at least one is visible, retrieve all matching Locators.
         # Note: .all() returns a list of Locators, ready for iteration.
@@ -247,7 +361,7 @@ def find_anchor_links_on_chemical_overview_modal(page):
             logger.exception("Exception while processing anchor %d", i)
             continue
 
-    logger.info(f"Found {len(ncn_link_list)} NCN links on page")
+    logger.info(f"Found {len(ncn_link_list)} links to NCN modals on page")
 
     return ncn_link_list
 
@@ -287,3 +401,4 @@ def navigate_to_chemical_overview_modal(page, url: str) -> bool:
     except Exception as e:
         logger.error(f"Error while waiting for modal visibility: {e}")
         return False
+
