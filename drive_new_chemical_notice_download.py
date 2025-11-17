@@ -1,3 +1,17 @@
+"""
+drive_new_chemical_notice_download.py
+
+Driver module implementing the New Chemical Notice specific navigation and scraping.
+
+This module is invoked by `harvestNewChemicalNotice.py` via the shared
+`harvest_framework.run_harvest` function. It contains the Playwright-driven
+logic to open modals, scrape HTML, gather download links, and add entries to
+a download plan which will be processed later by a sepaate script.
+We use`HarvestDB` (via the db object passed from the framework) for
+read/write of success/failure records.
+"""
+
+
 import atexit
 import logging
 import re
@@ -16,7 +30,7 @@ atexit.register(download_plan.flush)
 
 def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, file_types: Any = None, retry_interval_hours: float = 12.0) -> Dict[str, Any]:
     """ Walk the browser through the web pages and modals we need to capture
-    New Chemical Notice html content and pdfs
+    and from which we will download supporting files.
     """
     result: Dict[str, Any] = {
         'CAS:': cas_val,
@@ -74,14 +88,14 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
     nav_ok = navigate_to_chemical_overview_modal(page, url)
     if nav_ok:
         ncn_list = find_anchor_links_on_chemical_overview_modal(page)
-         # Process ncn links which should each have a modal and some PDFs to harvest
+         # Process ncn links which should each have a modal and some zips to harvest
         if ncn_list and len(ncn_list) > 0:
              for idx, ncn_link in enumerate(ncn_list, start=1):
                  # Scrape the modal and get the zip download links
                  scrape_success = scrape_modal_and_get_downloads(page, cas_dir, ncn_link, idx, need_html, need_pdf, result)
 
                  if need_pdf and scrape_success:
-                     # declare success for "pdf" / zip downloads
+                     # declare success here for "pdf" / zip downloads
                      result['pdf']['success'] = True
                      result['pdf']['local_file_path'] = str(cas_dir / "*_supporting_docs")
                      result['pdf']['navigate_via'] = url
@@ -93,7 +107,11 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
             result['pdf']['error'] = msg
 
 
-    # Post-loop: if we attempted processing then log failures for any file types that were explicitly set to False
+    # Post-loop: if we attempted processing then log failures for any file
+    # types that were explicitly set to False by the processing code.
+    # Success will have been logged at the point of processing.
+    # Note that "pdf" here is an umbrella term for all non-html downloads,
+    # which could be pdfs, zips, or xmls.
     if result.get('attempted'):
         logger.debug(f"After modal scrape attempt, result = {result}")
         if need_html:
@@ -117,7 +135,7 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
                         logger.exception("Failed to write success to DB for html post-loop")
                 else:
                     # PDF explicitly failed during processing -> log failure
-                    msg = result.get('pdf', {}).get('error') or "PDF processing failed or no links discovered"
+                    msg = result.get('pdf', {}).get('error') or "Download processing failed or no links discovered"
                     try:
                         db.log_failure(cas_val, file_types.new_chemical_notice_pdf, msg)
                     except Exception:

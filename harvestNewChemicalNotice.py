@@ -1,5 +1,24 @@
-# script to harvest html and PDF files related to New Chemical
-# Notices from the EPA ChemView website.
+"""
+harvestNewChemicalNotice.py
+
+Entrypoint wrapper to harvest New Chemical Notice (NCN) pages from EPA ChemView.
+
+This module is a thin wrapper that is invoked by the user (CLI). It:
+- Builds a `Config` object from defaults and command-line arguments.
+- Configures centralized logging via `logging_setup.initialize_logging`.
+- Calls `harvest_framework.run_harvest`, passing the `drive_new_chemical_notice_download` driver
+  and the `FileTypes` policy object.
+
+Relationships:
+- Calls: `harvest_framework.run_harvest`, `drive_new_chemical_notice_download.drive_new_chemical_notice_download`,
+  and `logging_setup.initialize_logging`.
+- Is called by: the user (e.g., `python harvestNewChemicalNotice.py ...`) as the top-level script.
+
+Contract / expectations:
+- The framework (`run_harvest`) manages opening the CSV, DB, optional shared browser, and the main loop.
+- The driver implements the report-specific Playwright navigation and scraping logic and returns a
+  result dictionary indicating successes/failures.
+"""
 
 import argparse
 import logging
@@ -14,8 +33,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    #input_file: str = "input_files/newChemicalNoticeExport20251112.csv"
-    input_file: str = "input_files/ncnExportTest.csv"
+    input_file: str = "input_files/newChemicalNoticeExport20251112.csv"
+    #input_file: str = "input_files/ncnExportTest.csv"
     archive_root: str = "chemview_archive_ncn"
     db_path: str = "chemview_harvest.db"
     headless: bool = False  # headless false means the browser will be displayed

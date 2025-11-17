@@ -1,3 +1,23 @@
+"""
+harvest_framework.py
+
+Common harvesting framework used by per-report harvest wrappers.
+
+This module is called by report-specific entrypoint scripts such as
+`harvestNewChemicalNotice.py`. It implements the main CSV-driven loop,
+manages a shared Playwright browser (optionally), opens the HarvestDB,
+and delegates per-row work to a driver function (e.g. a function from
+`drive_new_chemical_notice_download.py`).
+
+Contract:
+- Caller (harvestXXX.py) configures logging and builds a `Config` object.
+- The framework opens the input CSV and the DB, then calls the driver for
+  each row with parameters `(url, cas_val, cas_dir, debug_out, headless,
+  browser, page, db, file_types, retry_interval_hours)`.
+- Driver functions implement report-specific navigation, scraping, and
+  DB writes and should return a result dict describing successes/failures.
+"""
+
 import csv
 import logging
 import time

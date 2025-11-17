@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define the folder containing the .json files
-JSON_FOLDER="pdfDownloadsToDo"
+JSON_FOLDER="downloadsToDo"
 
 # Check if the folder exists
 if [ ! -d "$JSON_FOLDER" ]; then
