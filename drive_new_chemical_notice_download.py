@@ -206,12 +206,15 @@ def scrape_modal_and_get_downloads(page, cas_dir, ncn_link, idx, need_html: bool
         notice_number = f"item_{idx}"
         logger.debug(f"Falling back to default notice number: {notice_number}")
 
-
     # Extract the html from visible_modal_locator and save it to a file named
-    # ncn_<notice_number>.html in the cas_dir
+    # ncn_<notice_number>.html in notice folder.
+    notice_dir = None
     try:
         modal_html = visible_modal_locator.evaluate("el => el.outerHTML")
-        html_path = cas_dir / f"ncn_{notice_number}.html"
+        # create a folder for this notice number inside cas_dir
+        notice_dir = cas_dir / notice_number
+        notice_dir.mkdir(parents=True, exist_ok=True)
+        html_path = notice_dir / f"ncn_{notice_number}.html"
         with open(html_path, 'w', encoding='utf-8') as fh:
             fh.write(modal_html)
         logger.info(f"Saved modal HTML to {html_path}")
@@ -227,8 +230,9 @@ def scrape_modal_and_get_downloads(page, cas_dir, ncn_link, idx, need_html: bool
         zip_link_list = zip_locator.evaluate_all("anchors => anchors.map(a => a.href)")
         logger.info("Found %d ZIP download links", len(zip_link_list))
         if (len(zip_link_list) > 0):
-            # We want the zip files segregated into subfolders by notice number
-            download_plan.add_links_to_plan(download_plan.DOWNLOAD_PLAN_ACCUM, cas_dir, f"ncn_{notice_number}_supporting_docs", zip_link_list)
+            # Store the zip files in a subfolder of the notice folder
+            ncn_subfolder = f"{cas_dir}/{notice_number}/supporting_docs"
+            download_plan.add_links_to_plan(download_plan.DOWNLOAD_PLAN_ACCUM, "", ncn_subfolder, zip_link_list)
 
     # Close the modal using a robust locator and auto-wait
     # Close button resides in a sibling div to modal-body, so navigate up to modal-content first

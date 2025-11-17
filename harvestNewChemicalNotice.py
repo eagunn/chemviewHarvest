@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    input_file: str = "input_files/newChemicalNoticeExport20251112.csv"
-    #input_file: str = "input_files/ncnExportTest.csv"
+    #input_file: str = "input_files/newChemicalNoticeExport20251112.csv"
+    input_file: str = "input_files/ncnExportTest.csv"
     archive_root: str = "chemview_archive_ncn"
     db_path: str = "chemview_harvest.db"
     headless: bool = False  # headless false means the browser will be displayed
@@ -43,6 +43,7 @@ class Config:
     start_row: int = None  # if set, skip rows up to this row number
     stop_file: str = "harvest.stop"  # optional stop-file; when present the harvest stops gracefully
     retry_interval_hours: float = 12.0  # hours to wait after a failure before retrying
+    data_type: str = "newChemicalNotices"  # which data/report type this run targets
 
 # Initialize CONFIG with concrete type so static analyzers see its attributes
 CONFIG: Config = Config()
@@ -51,7 +52,7 @@ def initialize_config(argv):
     """
     Build the Config object from defaults and any runtime arguments given
 	"""
-    parser = argparse.ArgumentParser(description="Substantial Risk harvest script")
+    parser = argparse.ArgumentParser(description="New Chemical Notice harvest script")
     parser.add_argument("--headless", action="store_true", help="Run headless (placeholder)")
     parser.add_argument("--input-file", type=str, help="CSV input file name")
     parser.add_argument("--download-dir", type=str, help="Download directory")
@@ -62,6 +63,7 @@ def initialize_config(argv):
     parser.add_argument("--start-row", type=int, help="Start processing from this row number (1-based index)")
     parser.add_argument("--stop-file", dest='stop_file', type=str, help="Path to stop file (when present, harvest stops)")
     parser.add_argument("--retry-interval-hours", dest='retry_interval_hours', type=float, help="Hours to wait after a failure before retrying (default 12.0)")
+    parser.add_argument("--data-type", dest='data_type', type=str, help="Data/report type name (default: newChemicalNotices)")
     args = parser.parse_args(argv)
 
     global CONFIG
@@ -75,6 +77,7 @@ def initialize_config(argv):
         start_row=args.start_row if args.start_row is not None else None,
         stop_file=args.stop_file if args.stop_file is not None else Config.stop_file,
         retry_interval_hours=args.retry_interval_hours if args.retry_interval_hours is not None else Config.retry_interval_hours,
+        data_type=args.data_type if args.data_type is not None else Config.data_type,
     )
     logging.info(f"Configuration initialized: {CONFIG}")
 

@@ -165,13 +165,18 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
                 logger.warning("missing url or cas_val (url=%s, cas_val=%s), skipping this entry", url, cas_val)
                 continue
 
-            # Let the driver decide whether a download is needed and perform any DB updates.
-            url = fixup_url(url, cas_val)
+            # We will the driver decide whether downloads are needed or not,
+            # so we'll let it decide when/if to create new chemical folders, too.
+            # Note that both the postponement of folder creating and
+            # insertion of the data_type subfolder is new behavior
+            # as of work on New Chemical Notices. Files for the other data types will have
+            # be reorganized later.
             cas_dir = None
             if cas_val:
                 cas_clean = str(cas_val).strip()
-                cas_dir = Path(config.archive_root) / f"CAS-{cas_clean}"
-                cas_dir.mkdir(parents=True, exist_ok=True)
+                if (cas_clean[0].isdigit()):
+                    cas_clean = f"CAS-{cas_clean}"
+                cas_dir = Path(config.archive_root) / cas_clean / config.data_type
 
             start_time = time.perf_counter()
             logger.debug(f"about to call driver for cas={cas_val}, url={url}")
