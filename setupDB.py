@@ -39,6 +39,9 @@ def setup_database():
         conn.commit()
         print(f"Table '{TABLE_NAME}' checked/created successfully.")
 
+        # Also ensure the chemical_info table exists (idempotent)
+        create_chemical_info_table(conn)
+
     except sqlite3.Error as e:
         print(f"An error occurred during database setup: {e}")
     finally:
@@ -46,6 +49,33 @@ def setup_database():
         if conn:
             conn.close()
             print("Database connection closed.")
+
+
+def create_chemical_info_table(conn):
+    """Create the `chemical_info` table if it does not already exist.
+
+    Schema:
+      - chemical_id TEXT NOT NULL PRIMARY KEY
+      - chemview_db_id TEXT NOT NULL
+      - name TEXT
+
+    The `name` field may contain long strings with spaces, commas, dashes, etc.
+    """
+    create_sql = f"""
+    CREATE TABLE IF NOT EXISTS chemical_info (
+        chemical_id TEXT NOT NULL,
+        chemview_db_id TEXT NOT NULL,
+        name TEXT,
+        PRIMARY KEY (chemical_id)
+    );
+    """
+    try:
+        cur = conn.cursor()
+        cur.execute(create_sql)
+        conn.commit()
+        print("Table 'chemical_info' checked/created successfully.")
+    except sqlite3.Error as e:
+        print(f"An error occurred creating chemical_info table: {e}")
 
 
 # --- Execution ---

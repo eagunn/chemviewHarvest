@@ -179,6 +179,54 @@ class HarvestDB:
         logger.debug("Prior failure for %s / %s is too recent; skipping download", chemical_id, file_type)
         return False
 
+    def save_chemical_info(self, chemical_id: str, database_id: str, name: str) -> bool:
+        """
+        Ensure a chemical_info row exists for `chemical_id`.
+        - If no row exists: insert (chemical_id, database_id, name).
+        - If a row exists: if stored chemview_db_id or name differ from provided values, log an error and return False.
+          Otherwise do nothing and return True.
+        """
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_file)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT chemview_db_id, name FROM chemical_info WHERE chemical_id = ?;",
+                (chemical_id,)
+            )
+            row = cursor.fetchone()
+            if row is None:
+                # Insert new record
+                sql = """
+                      INSERT INTO chemical_info (chemical_id, chemview_db_id, name)
+                      VALUES (?, ?, ?); \
+                      """
+                success = self._execute_query(sql, (chemical_id, database_id, name)) is not None
+                if not success:
+                    logger.error("Failed to insert chemical_info for %s", chemical_id)
+                return success
+
+            # Row exists: compare values
+            existing_db_id = row["chemview_db_id"]
+            existing_name = row["name"]
+            if existing_db_id != database_id or existing_name != name:
+                logger.error(
+                    "chemical_info mismatch for %s: existing (chemview_db_id=%s, name=%s) != new (chemview_db_id=%s, name=%s)",
+                    chemical_id, existing_db_id, existing_name, database_id, name
+                )
+                return False
+
+            # No change needed
+            return True
+
+        except sqlite3.Error as e:
+            logger.error("Database error in save_chemical_info: %s", e, exc_info=True)
+            return False
+        finally:
+            if conn:
+                conn.close()
+
 
 # Module-level helper for backwards-compatible calls. Accepts either:
 # - a HarvestDB instance
@@ -228,55 +276,6 @@ def need_download_from_db(db_backend: Optional[Any], chemical_id: str, file_type
         return False
 
 
-# --- Example Usage (Demonstration) ---
-if __name__ == "__main__":
-    # NOTE: You must run the setup script once before running this.
-    db = HarvestDB()
-    test_id = "CHEM_1234"
-    # Use the centralized FileTypes constants for examples (keeps docs & code consistent)
-    test_file_type = FileTypes.section5_pdf
 
-    logger.info("--- 1. Check Initial Status ---")
-    status = db.get_harvest_status(test_id, test_file_type)
-    logger.info("Status before any action: %s", status)
-
-    logger.info("--- 2. Log First Failure ---")
-    db.log_failure(test_id, test_file_type, "somewhere")
-    status = db.get_harvest_status(test_id, test_file_type)
-    logger.info("Status after failure: %s", status)
-
-    logger.info("--- 3. Log Success ---")
-    file_path = f"/data/{test_id}_{test_file_type}.pdf"
-    db.log_success(test_id, test_file_type, file_path, "somewhere")
-    status = db.get_harvest_status(test_id, test_file_type)
-    logger.info("Status after success: %s", status)
-
-    logger.info("--- 4. Log a subsequent Failure (should keep success info) ---")
-    db.log_failure(test_id, test_file_type, "somewhere")
-    status = db.get_harvest_status(test_id, test_file_type)
-    # The important part: last_success_datetime and local_filepath should remain populated.
-    logger.info("Status after subsequent failure: %s", status)
-
-    logger.info("--- 5. Delete Success Records ---")
-    db.delete_success_records(test_id)
-    status = db.get_harvest_status(test_id, test_file_type)
-    logger.info("Status after deleting success records: %s", status)
-
-    logger.info("--- 6. Check Need for Download ---")
-    # This will use the need_download method
-    need_download = db.need_download(test_id, test_file_type)
-    logger.info("Need download (after success and failure): %s", need_download)
-
-    logger.info("--- 7. Log Failure, then Check Need Download ---")
-    db.log_failure(test_id, test_file_type, "somewhere")
-    need_download = db.need_download(test_id, test_file_type)
-    logger.info("Need download (after failure): %s", need_download)
-
-    logger.info("--- 8. Wait and Retry Logic ---")
-    # Simulate waiting by manually adjusting the last_failure_datetime
-    future_time = (datetime.now() - timedelta(hours=13)).strftime(DATE_FORMAT)
-    db.log_failure(test_id, test_file_type, "somewhere")
-    db._execute_query(f"UPDATE {TABLE_NAME} SET last_failure_datetime = ? WHERE chemical_id = ? AND file_type = ?", (future_time, test_id, test_file_type))
-    need_download = db.need_download(test_id, test_file_type)
-    logger.info("Need download (after adjusting time): %s", need_download)
-
+# Example usage / test harness moved to testDB.py to keep this module import-safe.
+# Run `python testDB.py` to execute the HarvestDB tests.

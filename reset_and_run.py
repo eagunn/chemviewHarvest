@@ -17,10 +17,10 @@ def run_harvest_script():
     try:
         command = [
             'python',
-            './harvestSubstantialRisk.py',
+            './harvestNewChemicalNotice.py',
             '--headless',
             #'--input-file', './input_files/srExportTest1.csv',
-            '--start-row', '214',
+            #'--start-row', '214',
             '--max-downloads', '1'
         ]
         print("About to execute command:", ' '.join(command))

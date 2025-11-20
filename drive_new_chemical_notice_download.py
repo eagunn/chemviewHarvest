@@ -18,6 +18,8 @@ import re
 from pathlib import Path
 from typing import Dict, Any, Optional
 import download_plan
+from HarvestDB import HarvestDB
+from urllib.parse import urlparse, parse_qs
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +87,7 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
     # from this point on down, we only need to set the msg value for failures
     # but will need to set 'success' to True on completed, confirmed successes.
 
-    nav_ok = navigate_to_chemical_overview_modal(page, url)
+    nav_ok = navigate_to_chemical_overview_modal(page, url, db)
     if nav_ok:
         ncn_list = find_anchor_links_on_chemical_overview_modal(page)
          # Process ncn links which should each have a modal and some zips to harvest
@@ -295,7 +297,7 @@ def find_anchor_links_on_chemical_overview_modal(page):
     return ncn_link_list
 
 
-def navigate_to_chemical_overview_modal(page, url: str) -> bool:
+def navigate_to_chemical_overview_modal(page, url: str, db) -> bool:
     """
     Navigates to the URL and waits for the chemical overview modal content to be visible.
 
@@ -304,6 +306,7 @@ def navigate_to_chemical_overview_modal(page, url: str) -> bool:
     selector = "div#chemical-detail-modal-body"
     timeout_ms = 30000
     # 1. Navigate to the page with a single, generous timeout (90s default)
+    nav_ok = False
     try:
         # Use page.goto and rely on Playwright's default internal retry mechanisms if needed
         # We target 'domcontentloaded' as it's the fastest signal that the basic page structure is ready.
@@ -311,22 +314,109 @@ def navigate_to_chemical_overview_modal(page, url: str) -> bool:
         logger.info(f"Navigation to URL successful: {url}")
     except TimeoutError as e:
         logger.error(f"Initial navigation to URL timed out ({timeout_ms}ms): {e}")
-        return False
+        # nav_ok remains False
     except Exception as e:
         logger.error(f"Initial navigation failed unexpectedly: {e}")
-        return False
+        # nav_ok remains False
+    else:
+        # 2. Use the Locator API to wait for the required modal content.
+        # The locator will retry finding and checking the visibility of the element
+        # until the timeout (default 30s, or you can pass a custom timeout here).
+        try:
+            modal_locator = page.locator(selector)
+            modal_locator.wait_for(state="visible", timeout=15000)  # Use 15s wait for the modal
+            logger.info("Modal content is present and visible.")
+            nav_ok = True
+        except TimeoutError as e:
+            logger.error(f"Modal content selector '{selector}' not found or visible within timeout (15s).")
+            # nav_ok remains False
+        except Exception as e:
+            logger.error(f"Error while waiting for modal visibility: {e}")
+            # nav_ok remains False
 
-    # 2. Use the Locator API to wait for the required modal content.
-    # The locator will retry finding and checking the visibility of the element
-    # until the timeout (default 30s, or you can pass a custom timeout here).
+    if nav_ok:
+        # Make a best-effort attempt to record chemical info from the modal
+        record_chemical_info(page, url, db)
+
+    return nav_ok
+
+
+def record_chemical_info(page, url: str, db):
+    """Extract chemical name and chemical identifier from the current modal page
+    and extract modalId from the supplied URL, then save into the chemical_info
+    table via HarvestDB.save_chemical_info.
+
+    This function is resilient: exceptions during extraction or DB save are logged
+    but do not raise.
+
+    It is somewhat speculative to conclude that the modalId= value is the internal
+    chemview database id for the chemical, but this seems relatively likely given the fact
+    that the same value appears in a script element at the top of at least some of these
+    modal pages with contents like:
+          /*
+			<![CDATA[*/
+      var chemicalDataId = 45102733;
+      //]]>
+    """
+    chem_name = None
+    chem_id = None
+    modal_id = None
+
+    # 1) Extract chemical name from modal header area.
     try:
-        modal_locator = page.locator(selector)
-        modal_locator.wait_for(state="visible", timeout=15000)  # Use 15s wait for the modal
-        logger.info("Modal content is present and visible.")
-        return True
-    except TimeoutError as e:
-        logger.error(f"Modal content selector '{selector}' not found or visible within timeout (15s).")
-        return False
-    except Exception as e:
-        logger.error(f"Error while waiting for modal visibility: {e}")
-        return False
+        # This could be brittle, but it's what comes to mind on inspection via the browser:
+        # cell: second row, first data cell (preferred)
+        chem_text_visible = ""
+        cell = page.locator("#chemical-detail-view tbody tr:nth-child(2) td:nth-child(1)").first
+        if cell.count() > 0:
+            chem_text_visible = cell.evaluate("el => el.innerText") or ""
+        # remove leading label 'Chemical Name' (case-insensitive) using flags instead of inline (?i)
+        chem_name = re.sub(r'^\s*Chemical\s*Name\s*[:\-]?\s*', '', chem_text_visible, flags=re.I).strip()
+        chem_name = re.sub(r'\s+', ' ', chem_name)
+        logger.debug("chemical name: '%s' ", chem_name)
+    except Exception:
+        logger.exception("Exception while extracting chemical name from page")
+
+    # 2) Extract chemical identifier (CAS or other identifier)
+    try:
+        chem_id = None
+        # Prefer the table cell: second cell in the second row of #chemical-detail-view
+        cell2 = page.locator("#chemical-detail-view tbody tr:nth-child(2) td:nth-child(2)").first
+        if cell2.count() > 0:
+            cell_text = cell2.evaluate("el => el.innerText") or ""
+            # Remove leading label like 'CAS #:' (case-insensitive) and normalize whitespace
+            chem_id_candidate = re.sub(r'^\s*CAS\s*#\s*[:\-]?\s*', '', cell_text, flags=re.I).strip()
+            chem_id_candidate = re.sub(r'\s+', ' ', chem_id_candidate)
+            chem_id = chem_id_candidate.strip()
+            logger.debug("Extracted chemical identifier from table cell: %s", chem_id)
+    except Exception:
+        logger.exception("Exception while extracting chemical identifier from page")
+
+    # 3) Extract modalId from URL
+    try:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        modal_vals = qs.get('modalId') or qs.get('modalid') or qs.get('modal')
+        if modal_vals:
+            modal_id = modal_vals[0]
+        else:
+            # fallback: regex search using top-level re
+            m = re.search(r'modalId=(\d+)', url, flags=re.IGNORECASE)
+            if m:
+                modal_id = m.group(1)
+        logger.debug("Extracted modalId from URL: %s", modal_id)
+    except Exception:
+        logger.exception("Exception while extracting modalId from URL: %s", url)
+
+    # 4) Save into DB if we have all three bits of info
+    if chem_id and chem_name and modal_id:
+        try:
+            ok = db.save_chemical_info(chem_id, modal_id, chem_name)
+            if ok:
+                logger.debug("Saved chemical info: chem_id=%s, modal_id=%s, chem_name=%s", chem_id, modal_id, chem_name)
+            else:
+                logger.error("HarvestDB.save_chemical_info indicated mismatch or failure for %s", chem_id)
+        except Exception:
+            logger.exception("Exception calling HarvestDB.save_chemical_info for %s", chem_id)
+    else:
+        logger.error("Insufficient data to record chemical info: chem_id=%s, chem_name=%s, modal_id=%s", chem_id, chem_name, modal_id)
