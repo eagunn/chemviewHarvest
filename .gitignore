@@ -17,13 +17,15 @@ __pycache__/
 *.log.*
 debug_artifacts/
 
+# semaphore files
+*.stop
+*.go
+
 # input and output files
 input_files/
 chemview_archive*/
 pdfDownloadsToDo/
 downloadsToDo/
-harvest.go
-harvest.stop
 
 # database files don't go in the repo for now
 *.db
