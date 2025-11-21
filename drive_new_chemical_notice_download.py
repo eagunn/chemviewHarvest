@@ -68,8 +68,8 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
     debug_out = Path(debug_out)
     debug_out.mkdir(parents=True, exist_ok=True)
     if cas_dir is None:
+        # TODO: should this be an outright failure?
         cas_dir = Path(".")
-    # Note: do not create cas_dir here; caller (harvest_framework) is responsible for ensuring cas_dir exists
 
     logger.info("Start of processing for URL: %s", url)
 
@@ -87,6 +87,11 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
     # from this point on down, we only need to set the msg value for failures
     # but will need to set 'success' to True on completed, confirmed successes.
 
+    # 21 Nov 25: We have started collecting and saving a basic set of chemical
+    # info in the db. We have already 2 of the three bits we want, Cas # and chem_id
+    # in the URL, save them and we will try to add chemical name later.
+    result = get_chem_info_ids(url, cas_val, result)
+
     nav_ok = navigate_to_chemical_overview_modal(page, url, db)
     if nav_ok:
         ncn_list = find_anchor_links_on_chemical_overview_modal(page)
@@ -95,7 +100,6 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
              for idx, ncn_link in enumerate(ncn_list, start=1):
                  # Scrape the modal and get the zip download links
                  scrape_success = scrape_modal_and_get_downloads(page, cas_dir, ncn_link, idx, need_html, need_pdf, result)
-
                  if need_pdf and scrape_success:
                      # declare success here for "pdf" / zip downloads
                      result['pdf']['success'] = True
@@ -108,8 +112,10 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
             result['html']['error'] = msg
             result['pdf']['error'] = msg
 
+    # Record chemical info if we have enough data
+    record_chemical_info(result, db)
 
-    # Post-loop: if we attempted processing then log failures for any file
+    # If we attempted processing then record failures for any file
     # types that were explicitly set to False by the processing code.
     # Success will have been logged at the point of processing.
     # Note that "pdf" here is an umbrella term for all non-html downloads,
@@ -223,6 +229,17 @@ def scrape_modal_and_get_downloads(page, cas_dir, ncn_link, idx, need_html: bool
         result['html']['success'] = True
         result['html']['local_file_path'] = str(html_path)
         result['html']['navigate_via'] = page.url
+        # Make best-effort attempt to capture chemical's name
+        nameSpan = visible_modal_locator.locator("li:has-text('Chemical Name') span span").first
+        chem_name = ""
+        if nameSpan.count() > 0:
+            chem_name = nameSpan.evaluate("el => el.innerText") or ""
+        chem_name = re.sub(r'\s+', ' ', chem_name).strip()
+        if chem_name:
+            logger.debug("Extracted chemical name from modal: %s", chem_name)
+            result['chem_info']['chem_name'] = chem_name
+        else:
+            logger.warning("Chemical name elementnot found in modal")
     except Exception as e:
         logger.warning(f"Error saving modal HTML: {e}")
 
@@ -250,6 +267,51 @@ def scrape_modal_and_get_downloads(page, cas_dir, ncn_link, idx, need_html: bool
         logger.warning("Close button not found in modal; skipping close")
 
     return True
+
+def get_chem_info_ids(url, cas_val, result):
+    """Extract two values from the url:
+    - chem_id: which we then sanity check against the cas_val
+    - chem_db_id: extracted from modalId= in the URL
+
+    It is somewhat speculative to conclude that the modalId= value is the internal
+    chemview database id for the chemical, but this seems relatively likely given the fact
+    that the same value appears in a script element at the top of at least some of our
+    modal pages with contents like:
+          /*
+            <![CDATA[*/
+      var chemicalDataId = 45102733;
+      //]]>
+    """
+    chem_id = None
+    chem_db_id = None
+    result['chem_info'] = {}
+    try:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        modal_vals = qs.get('modalId')
+        if modal_vals:
+            chem_db_id = modal_vals[0]
+            logger.debug("Extracted modalId/chem_db_id %s from URL", chem_db_id)
+        else:
+            logger.warning("No modalId found in URL")
+        cas_vals = qs.get('ch')
+        if cas_vals:
+            chem_id = cas_vals[0]
+            logger.debug("Extracted chem_id %s from URL", chem_id)
+            # Sanity check chem_id against cas_val
+            if chem_id != cas_val:
+                logger.warning("chem_id %s from URL does not match cas_val %s, will use passed-in cas_val", chem_id, cas_val)
+                # if they don't match, use the primary value we trust: cas_val
+                chem_id = cas_val
+        else:
+            logger.warning("No chem_id found in URL")
+    except Exception:
+        logger.exception("Exception while extracting ids from URL: %s", url)
+
+    result['chem_info']['chem_id'] = chem_id
+    result['chem_info']['chem_db_id'] = chem_db_id
+
+    return result
 
 
 def find_anchor_links_on_chemical_overview_modal(page):
@@ -333,90 +395,20 @@ def navigate_to_chemical_overview_modal(page, url: str, db) -> bool:
         except Exception as e:
             logger.error(f"Error while waiting for modal visibility: {e}")
             # nav_ok remains False
-
-    if nav_ok:
-        # Make a best-effort attempt to record chemical info from the modal
-        record_chemical_info(page, url, db)
-
     return nav_ok
 
+def record_chemical_info(result, db):
 
-def record_chemical_info(page, url: str, db):
-    """Extract chemical name and chemical identifier from the current modal page
-    and extract modalId from the supplied URL, then save into the chemical_info
-    table via HarvestDB.save_chemical_info.
-
-    This function is resilient: exceptions during extraction or DB save are logged
-    but do not raise.
-
-    It is somewhat speculative to conclude that the modalId= value is the internal
-    chemview database id for the chemical, but this seems relatively likely given the fact
-    that the same value appears in a script element at the top of at least some of these
-    modal pages with contents like:
-          /*
-			<![CDATA[*/
-      var chemicalDataId = 45102733;
-      //]]>
-    """
-    chem_name = None
-    chem_id = None
-    modal_id = None
-
-    # 1) Extract chemical name from modal header area.
-    try:
-        # This could be brittle, but it's what comes to mind on inspection via the browser:
-        # cell: second row, first data cell (preferred)
-        chem_text_visible = ""
-        cell = page.locator("#chemical-detail-view tbody tr:nth-child(2) td:nth-child(1)").first
-        if cell.count() > 0:
-            chem_text_visible = cell.evaluate("el => el.innerText") or ""
-        # remove leading label 'Chemical Name' (case-insensitive) using flags instead of inline (?i)
-        chem_name = re.sub(r'^\s*Chemical\s*Name\s*[:\-]?\s*', '', chem_text_visible, flags=re.I).strip()
-        chem_name = re.sub(r'\s+', ' ', chem_name)
-        logger.debug("chemical name: '%s' ", chem_name)
-    except Exception:
-        logger.exception("Exception while extracting chemical name from page")
-
-    # 2) Extract chemical identifier (CAS or other identifier)
-    try:
-        chem_id = None
-        # Prefer the table cell: second cell in the second row of #chemical-detail-view
-        cell2 = page.locator("#chemical-detail-view tbody tr:nth-child(2) td:nth-child(2)").first
-        if cell2.count() > 0:
-            cell_text = cell2.evaluate("el => el.innerText") or ""
-            # Remove leading label like 'CAS #:' (case-insensitive) and normalize whitespace
-            chem_id_candidate = re.sub(r'^\s*CAS\s*#\s*[:\-]?\s*', '', cell_text, flags=re.I).strip()
-            chem_id_candidate = re.sub(r'\s+', ' ', chem_id_candidate)
-            chem_id = chem_id_candidate.strip()
-            logger.debug("Extracted chemical identifier from table cell: %s", chem_id)
-    except Exception:
-        logger.exception("Exception while extracting chemical identifier from page")
-
-    # 3) Extract modalId from URL
-    try:
-        parsed = urlparse(url)
-        qs = parse_qs(parsed.query)
-        modal_vals = qs.get('modalId') or qs.get('modalid') or qs.get('modal')
-        if modal_vals:
-            modal_id = modal_vals[0]
-        else:
-            # fallback: regex search using top-level re
-            m = re.search(r'modalId=(\d+)', url, flags=re.IGNORECASE)
-            if m:
-                modal_id = m.group(1)
-        logger.debug("Extracted modalId from URL: %s", modal_id)
-    except Exception:
-        logger.exception("Exception while extracting modalId from URL: %s", url)
-
-    # 4) Save into DB if we have all three bits of info
-    if chem_id and chem_name and modal_id:
+    # Save chem info to DB if we have the three bits of info we need
+    chem_info = result.get('chem_info', {})
+    if chem_info and chem_info['chem_id'] and chem_info['chem_db_id'] and chem_info['chem_name']:
         try:
-            ok = db.save_chemical_info(chem_id, modal_id, chem_name)
+            ok = db.save_chemical_info(chem_info['chem_id'], chem_info['chem_db_id'], chem_info['chem_name'])
             if ok:
-                logger.debug("Saved chemical info: chem_id=%s, modal_id=%s, chem_name=%s", chem_id, modal_id, chem_name)
+                logger.debug("Saved chemical info: %s", chem_info)
             else:
-                logger.error("HarvestDB.save_chemical_info indicated mismatch or failure for %s", chem_id)
+                logger.error("HarvestDB.save_chemical_info indicated mismatch or failure for %s", chem_info)
         except Exception:
-            logger.exception("Exception calling HarvestDB.save_chemical_info for %s", chem_id)
+            logger.exception("Exception calling HarvestDB.save_chemical_info for %s", chem_info)
     else:
-        logger.error("Insufficient data to record chemical info: chem_id=%s, chem_name=%s, modal_id=%s", chem_id, chem_name, modal_id)
+        logger.error("Insufficient data to record chemical info: %s", chem_info)
