@@ -33,9 +33,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    #input_file: str = "input_files/newChemicalNoticeExport20251112.csv"
-    input_file: str = "input_files/ncnExportTest.csv"
-    archive_root: str = "chemview_archive_ncn"
+    input_file: str = "input_files/newChemicalNoticeExport20251112.csv"
+    #input_file: str = "input_files/ncnExportTest.csv"
+    archive_root: str = "H:/openSource/dataPreservation/chemView/harvest/chemview_archive_ncn"
     db_path: str = "chemview_harvest.db"
     headless: bool = False  # headless false means the browser will be displayed
     debug_out: str = "debug_artifacts"
