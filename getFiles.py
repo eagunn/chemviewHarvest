@@ -5,6 +5,7 @@
 from bs4 import BeautifulSoup
 import json
 import os
+from pathlib import Path
 import requests
 import time
 import urllib.parse
@@ -18,8 +19,9 @@ SLEEP_SECONDS_AFTER_DOWNLOAD = 1
 def makeAndChangeToFolder(folderName):
     if not os.path.exists(folderName):
         os.makedirs(folderName)
+        logger.info(f"Made new folder and will change to it: {os.getcwd()}")
     os.chdir(folderName)
-    logger.info(f"About to process files for folder: {os.getcwd()}")
+
 
 
 def extract_filename_from_url(downloadURL: str) -> str:
@@ -153,21 +155,38 @@ def savePage(pageToSave):
 
 
 # Lordy, lordy a legitimate use for recursion!
-def processNestedDictionary(nestedDict, stats):
+def processNestedDictionary(nestedDict, stats, stop_path):
     makeAndChangeToFolder(nestedDict["folder"])
 
     # Process downloadList
     for fileUrl in nestedDict.get("downloadList", []):
+        if mustStop(stop_path):
+            # terminate recursion with prejudice
+            return
         getOneFile(fileUrl, stats)
 
     if nestedDict.get("pageToSave", "") != "":
+        if mustStop(stop_path):
+            # terminate recursion with prejudice
+            return
         savePage(nestedDict["pageToSave"])
 
     # Recurse into subfolders
     for subfolder in nestedDict.get("subfolderList", []):
-        processNestedDictionary(subfolder, stats)
+        if mustStop(stop_path):
+            # terminate recursion with prejudice
+            return
+        processNestedDictionary(subfolder, stats, stop_path)
 
     os.chdir("..")  # Move back up after processing
+
+def mustStop(stop_path: os.PathLike) -> bool:
+    must_stop = False
+    if stop_path.exists():
+        logger.info("Stop file detected at %s; terminating recursion with prejudice.", stop_path)
+        print("Stop file detected; terminating getFiles recursion.")
+        must_stop = True
+    return must_stop
 
 def main():
     import sys
@@ -178,6 +197,11 @@ def main():
         sys.exit(2)
 
     jsonPath = sys.argv[1]
+
+    # We need a way to get this long-running process to terminate gracefully
+    # We use a semaphore file in the current working directory
+    stop_path = Path.cwd() / Path("getFiles.stop")
+    logger.info("Will watch for stop file: %s", stop_path)
 
     # configure logging to write to get.log (append mode)
     logging.basicConfig(
@@ -202,7 +226,7 @@ def main():
         sys.exit(3)
 
     stats = { "downloadCount" : 0, "errorCount" : 0, "skipCount" : 0 }
-    processNestedDictionary(downloadDict, stats)
+    processNestedDictionary(downloadDict, stats, stop_path)
     logger.info(json.dumps(stats, indent=4))
     endTime = time.time()
     logger.info("End: %s", time.ctime(endTime))
