@@ -23,13 +23,18 @@ def makeAndChangeToFolder(folderName):
 
 
 def extract_filename_from_url(downloadURL: str) -> str:
-    """Extract a filename from a URL.
-    - If the query contains a 'filename=' parameter, return its raw value (preserve percent-encoding).
-    - Otherwise return the basename of the path.
-    The returned filename is sanitized to remove characters not allowed in filenames.
+    """Extract a safe filename from a URL.
+
+    - Prefer an uninterpreted 'filename=' query value when present (preserve percent-encoding).
+    - Otherwise use the basename of the path.
+    - Replace any percent-encoded forward slashes (%2F) with '_' so they cannot be interpreted
+      as path separators, and replace literal '/' or '\\' with '_'.
+    - Strip or replace characters illegal on Windows (<>:"|?*) and control characters with '_'.
+    - Return a non-empty filename (falls back to 'unknown_download').
     """
     parsed = urllib.parse.urlparse(downloadURL)
     filename = None
+
     # Look for an uninterpreted 'filename=' key in the raw query string to preserve percent-encoding
     q = parsed.query or ''
     if 'filename=' in q:
@@ -37,24 +42,42 @@ def extract_filename_from_url(downloadURL: str) -> str:
             if pair.startswith('filename='):
                 filename = pair[len('filename='):]
                 break
+
     if not filename:
-        # fallback to path basename (already not percent-decoded)
-        filename = os.path.basename(parsed.path)
+        # fallback to path basename (may be percent-encoded)
+        filename = os.path.basename(parsed.path) or ''
+
+    # If the filename contains percent-encoded forward-slash sequences (%2F),
+    # take only the part after the final %2F (case-insensitive). This mirrors
+    # browser behavior where the last segment is the actual file name.
+    if filename and re.search(r'(?i)%2f', filename):
+        parts = re.split(r'(?i)%2f', filename)
+        if parts:
+            filename = parts[-1]
+
+    # Trim quotes/whitespace
+    filename = filename.strip('"\'" ')
+
+    # Normalize percent-encoded forward slashes to underscores so they cannot become path separators
+    filename = re.sub(r'(?i)%2f', '_', filename)
+    # Replace any literal path separators with underscore
+    filename = filename.replace('/', '_').replace('\\', '_')
 
     # Sanitize filename: remove characters illegal on Windows and replace with underscore
-    # Preserve percent-encoding like '%2F' (do not unquote)
-    forbidden = set('<>:"/\\|?*')
+    forbidden = set('<>:"|?*')
     safe_chars = []
     for ch in filename:
-        if ch in forbidden or ord(ch) < 32:
+        # control characters and forbidden characters get converted to underscores
+        if ord(ch) < 32 or ch in forbidden:
             safe_chars.append('_')
         else:
             safe_chars.append(ch)
     safe = ''.join(safe_chars).strip()
+
     if not safe:
         safe = 'unknown_download'
-    # Replace any %2F (case-insensitive) sequence with an underscore so '8e%2Ffoo' -> '8e_foo'
-    safe = re.sub(r'(?i)%2f', '_', safe)
+
+    logger.debug("extracted filename: %s from URL: %s", safe, downloadURL)
     return safe
 
 
@@ -107,11 +130,10 @@ def savePage(pageToSave):
         pageSoup = None
         response = None
         try:
-            response = requests.get(pageToSave["url"])
+            response = requests.get(pageToSave["url"], stream=True)
             response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
             response.encoding = 'utf-8'
             pageSoup = BeautifulSoup(response.content, "html.parser")
-            # print("have collection page!", file=log)
         except FileNotFoundError:
             logger.error("***Error: Page not found at %s", pageToSave["url"])
         except Exception as e:
@@ -173,7 +195,7 @@ def main():
             downloadDict = json.load(json_file)
             logger.info("Dictionary loaded from %s", jsonPath)
     except OSError as e:
-        logger.error("Error reading from file: %s", e)
+        logger.error("Error loading dictionary from file: %s", e)
         sys.exit(3)
     except json.JSONDecodeError as e:
         logger.error("Error decoding json: %s", e)
