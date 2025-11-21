@@ -19,7 +19,7 @@ SLEEP_SECONDS_AFTER_DOWNLOAD = 1
 def makeAndChangeToFolder(folderName):
     if not os.path.exists(folderName):
         os.makedirs(folderName)
-        logger.info(f"Made new folder and will change to it: {os.getcwd()}")
+        logger.debug(f"Made new folder and will change to it: {os.getcwd()}")
     os.chdir(folderName)
 
 
@@ -102,7 +102,7 @@ def getOneFile(downloadURL, stats):
                 with open(filename, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         f.write(chunk)
-                logger.info("File written successfully to: %s", filename)
+                logger.info("File written successfully to: %s", os.path.abspath(filename))
                 stats["downloadCount"] += 1
                 downloadOk = True
                 time.sleep(SLEEP_SECONDS_AFTER_DOWNLOAD)  # pause between files
