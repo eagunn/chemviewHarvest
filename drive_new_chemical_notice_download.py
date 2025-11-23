@@ -284,7 +284,11 @@ def get_chem_info_ids(url, cas_val, result):
     """
     chem_id = None
     chem_db_id = None
-    result['chem_info'] = {}
+    result['chem_info'] = {
+        'chem_id': None,
+        'chem_db_id': None,
+        'chem_name': None
+    }
     try:
         parsed = urlparse(url)
         qs = parse_qs(parsed.query)
@@ -398,9 +402,9 @@ def navigate_to_chemical_overview_modal(page, url: str, db) -> bool:
     return nav_ok
 
 def record_chemical_info(result, db):
-
     # Save chem info to DB if we have the three bits of info we need
     chem_info = result.get('chem_info', {})
+    logger.debug("in record_chemical_info with chem_info: %s", chem_info)
     if chem_info and chem_info['chem_id'] and chem_info['chem_db_id'] and chem_info['chem_name']:
         try:
             ok = db.save_chemical_info(chem_info['chem_id'], chem_info['chem_db_id'], chem_info['chem_name'])
