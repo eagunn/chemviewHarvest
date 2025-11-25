@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    input_file: str = "input_files/premanufactureNoticeExport20251123.csv"
+    input_file: str = "input_files/premanufactureNoticesExport20251123.csv"
     #input_file: str = "input_files/pmnExportTest.csv"
     archive_root: str = "H:/openSource/dataPreservation/chemView/harvest/chemview_archive_pmn"
     db_path: str = "chemview_harvest.db"
