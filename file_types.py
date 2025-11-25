@@ -9,6 +9,8 @@ class FileTypes:
     substantial_risk_pdf = "substantial_risk_pdf"
     new_chemical_notice_html = "new_chemical_notice_html"
     new_chemical_notice_pdf = "new_chemical_notice_pdf"
+    premanufacture_notice_html = "premanufacture_notice_html"
+    premanufacture_notice_pdf = "premanufacture_notice_pdf"
 
 __all__ = ["FileTypes"]
 

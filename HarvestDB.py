@@ -18,7 +18,9 @@ from file_types import FileTypes
 logger = logging.getLogger(__name__)
 
 # --- Configuration ---
-DATABASE_FILE = 'chemview_harvest.db'
+#DATABASE_FILE = 'chemview_harvest.db'
+# ************ DEV ONLY ************
+DATABASE_FILE = 'chemview_test.db'
 TABLE_NAME = 'harvest_log'
 DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
 
@@ -132,6 +134,26 @@ class HarvestDB:
                 return False
         except Exception as e:
             logger.error("Error deleting success records for chemical_id %s: %s", chemical_id, e, exc_info=True)
+            return False
+
+    def delete_any_records(self, chemical_id: str) -> bool:
+        """
+        Deletes any records, success or failure, for the given chemical_id from the database.
+        """
+        sql = f"""
+        DELETE FROM {TABLE_NAME}
+        WHERE chemical_id = ? ;
+        """
+        try:
+            result = self._execute_query(sql, (chemical_id,))
+            if result:
+                logger.info("Deleted  records for chemical_id: %s", chemical_id)
+                return True
+            else:
+                logger.warning("No records found for chemical_id: %s", chemical_id)
+                return False
+        except Exception as e:
+            logger.error("Error deleting ecords for chemical_id %s: %s", chemical_id, e, exc_info=True)
             return False
 
     def need_download(self, chemical_id: str, file_type: str, retry_interval_hours: float = 12.0) -> bool:

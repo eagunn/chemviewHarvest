@@ -3,6 +3,7 @@ import os
 
 # --- Configuration ---
 DATABASE_FILE = 'chemview_harvest.db'
+DATABASE_FILE = 'chemview_test.db'
 TABLE_NAME = 'harvest_log'  # Renamed table
 
 

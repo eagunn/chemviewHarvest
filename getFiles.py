@@ -49,6 +49,22 @@ def extract_filename_from_url(downloadURL: str) -> str:
         # fallback to path basename (may be percent-encoded)
         filename = os.path.basename(parsed.path) or ''
 
+    # Special-case common generic filename 'content.pdf': use the parent path segment
+    # as a more informative filename when available. Do this *before* the later
+    # %2F-handling and sanitization.
+    try:
+        if filename and filename.lower() == 'content.pdf':
+            # Decode percent-encodings in the path and split on '/'
+            path_parts = [p for p in urllib.parse.unquote(parsed.path).split('/') if p]
+            if len(path_parts) >= 2:
+                # take the immediate parent segment (the segment before 'content.pdf')
+                parent_seg = path_parts[-2]
+                ext = os.path.splitext(filename)[1] or ''
+                filename = f"{parent_seg}{ext}"
+                logger.info("Converted generic filename 'content.pdf' to '%s' using URL path", filename)
+    except Exception:
+        logger.exception("Error while handling content.pdf special-case for URL: %s", downloadURL)
+
     # If the filename contains percent-encoded forward-slash sequences (%2F),
     # take only the part after the final %2F (case-insensitive). This mirrors
     # browser behavior where the last segment is the actual file name.
@@ -95,10 +111,17 @@ def getOneFile(downloadURL, stats):
         logger.info("about to get: %s", downloadURL)
         downloadOk = False
         try:
-            response = requests.get(downloadURL)
+            # Some browser block non-browser clients, so we set a User-Agent header
+            # to mimic a common browser.
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                # Optionally add "Referer" if the site requires it
+            }
+            response = requests.get(downloadURL, headers=headers, stream=True, timeout=30)
             response.raise_for_status()  # Raises HTTPError for bad responses (4xx or 5xx)
             if response.status_code == 200:  # 200 means the file exists
-
                 with open(filename, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         f.write(chunk)
@@ -182,10 +205,14 @@ def processNestedDictionary(nestedDict, stats, stop_path):
 
 def mustStop(stop_path: os.PathLike) -> bool:
     must_stop = False
-    if stop_path.exists():
-        logger.info("Stop file detected at %s; terminating recursion with prejudice.", stop_path)
-        print("Stop file detected; terminating getFiles recursion.")
-        must_stop = True
+    try:
+        p = Path(stop_path)
+        if p.exists():
+            logger.info("Stop file detected at %s; terminating recursion with prejudice.", p)
+            print("Stop file detected; terminating getFiles recursion.")
+            must_stop = True
+    except Exception:
+        logger.exception("Error while checking stop file path: %s", stop_path)
     return must_stop
 
 def main():

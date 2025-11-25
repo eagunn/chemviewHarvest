@@ -191,6 +191,7 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
                 db=db,
                 file_types=file_types,
                 retry_interval_hours=getattr(config, 'retry_interval_hours', 12.0),
+                archive_root=config.archive_root
             )
             end_time = time.perf_counter()
             elapsed = end_time - start_time

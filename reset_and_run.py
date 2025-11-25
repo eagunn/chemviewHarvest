@@ -6,19 +6,19 @@ def delete_chemical_records(chemical_id):
     """Delete success records for the given chemical_id from the database."""
     try:
         db = HarvestDB()
-        db.delete_success_records(chemical_id)
+        db.delete_any_records(chemical_id)
         print(f"Successfully deleted records for chemical_id: {chemical_id}")
     except Exception as e:
         print(f"Error deleting records for chemical_id {chemical_id}: {e}")
 
 
 def run_harvest_script():
-    """Run the harvestSubstantialRisk.py script with the specified commandline arguments."""
+    """Run the target script with the specified commandline arguments."""
     try:
         command = [
             'python',
-            './harvestNewChemicalNotice.py',
-            '--headless',
+            './harvestPremanufactureNotice.py',
+            #'--headless',
             #'--input-file', './input_files/srExportTest1.csv',
             #'--start-row', '214',
             '--max-downloads', '1'
