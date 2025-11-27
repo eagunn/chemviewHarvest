@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 from typing import Dict, Any, Optional
 import download_plan
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, parse_qsl, urlencode, urlunparse
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,9 @@ def drive_premanufacture_notice_download(url, cas_val, cas_dir: Path, debug_out=
     # 21 Nov 25: We have started collecting and saving a basic set of chemical
     # info in the db. At this point, we already have 2 of the three bits we
     # want: Cas # and chem_id. Pull them from the URL
-    result = get_chem_info_ids(url, cas_val, result)
+    # 26 Nov 25: Doing this revealed that our failing URLs were missing the ch=cas_val
+    # parameter, so we now repair the URL if needed.
+    result, url = validate_url_and_get_chem_info_ids(url, cas_val, result)
 
     nav_ok = navigate_to_chemical_overview_modal(page, url, db)
     if nav_ok:
@@ -206,18 +208,30 @@ def scrape_modal_and_get_downloads(page, cas_dir, pmn_link, idx, need_html: bool
         return None
 
     pmn_number = None
+    raw_pmn = None
     try:
         pmn_span = visible_modal_locator.locator('span#PMN_Number').first
         if pmn_span.count() > 0:
             raw_pmn = pmn_span.inner_text().strip()
-            # Sanitize for filename: keep alphanum, dash, underscore
-            pmn_number = re.sub(r'[^A-Za-z0-9\-_]', '_', raw_pmn)
-            logger.debug(f"Extracted and sanitized pmn number: {pmn_number}")
+            logger.debug(f"Using raw pmn number: {raw_pmn}")
         else:
             logger.warning("pmn number span not found in modal")
+            # will attempt to get number from anchor tag instead
+            anchor = visible_modal_locator.locator(
+                "div.snur_meta:has(span#PMN_Number_label) a.show_external_link").first
+            if anchor.count() > 0:
+                raw_pmn = anchor.inner_text().strip()
+                logger.debug(f"Using raw anchor pmn number: {raw_pmn}")
+            else:
+                logger.warning("pmn number anchor not found in modal, will fall back to item number")
     except Exception as e:
         logger.warning(f"Error extracting pmn number: {e}")
-    if pmn_number is None:
+
+    if raw_pmn is not None:
+        # Sanitize for filename: keep alphanum, dash, underscore
+        pmn_number = re.sub(r'[^A-Za-z0-9\-_]', '_', raw_pmn)
+        logger.debug(f"Extracted and sanitized pmn number: {pmn_number}")
+    else:
         pmn_number = f"item_{idx}"
         logger.debug(f"Falling back to default pmn number: {pmn_number}")
 
@@ -293,6 +307,8 @@ def scrape_modal_and_get_downloads(page, cas_dir, pmn_link, idx, need_html: bool
             # Store the doc files in a subfolder of the notice folder
             pmn_subfolder = f"{cas_dir}/{pmn_number}/supporting_docs"
             download_plan.add_links_to_plan(download_plan.DOWNLOAD_PLAN_ACCUM, "", pmn_subfolder, pdf_link_list)
+        else:
+            logger.warning("No supporting doc links found")
 
     # Close the modal using a robust locator and auto-wait
     # Close button resides in a sibling div to modal-body, so navigate up to modal-content first
@@ -309,10 +325,13 @@ def scrape_modal_and_get_downloads(page, cas_dir, pmn_link, idx, need_html: bool
 
     return True
 
-def get_chem_info_ids(url, cas_val, result):
-    """Extract two values from the url:
+def validate_url_and_get_chem_info_ids(url, cas_val, result):
+    """Extract two values from the url, if we can:
     - chem_id: which we then sanity check against the cas_val
     - chem_db_id: extracted from modalId= in the URL
+
+    If chem_id is not found, then the url is defective (we are seeing this for most/all
+    chemicals with non-numeric cas_vals) and we need to repair it.
 
     It is somewhat speculative to conclude that the modalId= value is the internal
     chemview database id for the chemical, but this seems relatively likely given the fact
@@ -328,7 +347,7 @@ def get_chem_info_ids(url, cas_val, result):
     result['chem_info'] = {
         'chem_id': None,
         'chem_db_id': None,
-        'chem_name': None
+        'chem_name': None  # to be filled later
     }
     try:
         parsed = urlparse(url)
@@ -349,14 +368,19 @@ def get_chem_info_ids(url, cas_val, result):
                 # if they don't match, use the primary value we trust: cas_val
                 chem_id = cas_val
         else:
-            logger.warning("No chem_id found in URL")
+            logger.info("No chem_id found in URL, will insert cas_val in URL and use for chem_id")
+            chem_id = cas_val
+            # Repair the URL by adding ch=<cas_val>
+            params = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if k.lower() != 'ch']
+            params.append(('ch', cas_val))
+            url = urlunparse(parsed._replace(query=urlencode(params, doseq=True)))
     except Exception:
         logger.exception("Exception while extracting ids from URL: %s", url)
 
     result['chem_info']['chem_id'] = chem_id
     result['chem_info']['chem_db_id'] = chem_db_id
 
-    return result
+    return result, url
 
 
 def find_anchor_links_on_chemical_overview_modal(page):

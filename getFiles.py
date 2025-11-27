@@ -260,8 +260,12 @@ def main():
     logger.info("Elapsed time: %s seconds", endTime - startTime)
 
     # Exit with an appropriate code: 0=success, 1=processing errors
-    if stats.get("errorCount", 0) > 0:
-        sys.exit(1)
+    # 2025 11 25 -- seeing one file fail out of hundreds, so treat as non-fatal
+    # but let the user see if she is paying attention
+    error_count = stats.get("errorCount", 0)
+    if error_count > 0:
+        print("Completed with some errors; see log for details.")
+        print(stats)
     sys.exit(0)
 
 main()
