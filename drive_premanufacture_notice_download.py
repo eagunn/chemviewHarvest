@@ -3,7 +3,7 @@ drive_premanufacture_notice_download.py
 
 Driver module implementing the Premanufacture Notice specific navigation and scraping.
 
-This module is invoked by the harvest wrapper via the shared
+This module is invoked by `harvestPremanufactureNotice.py` via the shared
 `harvest_framework.run_harvest` function. It contains the Playwright-driven
 logic to open modals, scrape HTML, gather download links, and add entries to
 a download plan which will be processed later by a separate script.
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # name and circular imports). Initialize lazily on first driver invocation using
 # the `cas_dir` value the framework passes in (derived from Config.archive_root).
 _DOWNLOAD_PLAN_INITIALIZED = False
-_DOWNLOAD_PLAN_DEFAULT_FOLDER = 'chemview_archive_premanufacture'
+_DOWNLOAD_PLAN_DEFAULT_FOLDER = 'chemview_archive_pmn'
 
 
 def drive_premanufacture_notice_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, file_types: Any = None, retry_interval_hours: float = 12.0, archive_root=None) -> Dict[str, Any]:
@@ -52,7 +52,7 @@ def drive_premanufacture_notice_download(url, cas_val, cas_dir: Path, debug_out=
         result['pdf']['error'] = msg
         return result
 
-    # Map file type names: keep method calls the same but request the PMN file types
+    # Use db records to determine if we should try/retry this download now
     need_html = db.need_download(cas_val, file_types.premanufacture_notice_html, retry_interval_hours=retry_interval_hours)
     need_pdf = db.need_download(cas_val, file_types.premanufacture_notice_pdf, retry_interval_hours=retry_interval_hours)
 
@@ -64,14 +64,14 @@ def drive_premanufacture_notice_download(url, cas_val, cas_dir: Path, debug_out=
     if debug_out is None:
         debug_out = Path("debug_artifacts")
     debug_out = Path(debug_out)
-    debug_out.mkdir(parents=True, exist_ok=True)\
+    debug_out.mkdir(parents=True, exist_ok=True)
 
     if cas_dir is None:
         logger.error("cas_dir is required")
         return result
 
-    # Lazy-initialize the download_plan using the folder name derived from
-    # the provided cas_dir (its parent folder name is the archive root folder).
+    # Lazy-initialize the download_plan using the configured 
+	# archive root folder.
     global _DOWNLOAD_PLAN_INITIALIZED
     if not _DOWNLOAD_PLAN_INITIALIZED:
         try:
@@ -102,7 +102,7 @@ def drive_premanufacture_notice_download(url, cas_val, cas_dir: Path, debug_out=
     # info in the db. At this point, we already have 2 of the three bits we
     # want: Cas # and chem_id. Pull them from the URL
     # 26 Nov 25: Doing this revealed that our failing URLs were missing the ch=cas_val
-    # parameter, so we now repair the URL if needed.
+    # parameter, so we now repair the URL if needed and always return it.
     result, url = validate_url_and_get_chem_info_ids(url, cas_val, result)
 
     nav_ok = navigate_to_chemical_overview_modal(page, url, db)
@@ -233,7 +233,7 @@ def scrape_modal_and_get_downloads(page, cas_dir, pmn_link, idx, need_html: bool
         logger.debug(f"Extracted and sanitized pmn number: {pmn_number}")
     else:
         pmn_number = f"item_{idx}"
-        logger.debug(f"Falling back to default pmn number: {pmn_number}")
+        logger.debug(f"Falling back to default using item number for pmn number: {pmn_number}")
 
     # Extract the html from visible_modal_locator and save it to a file named
     # pmn_<pmn_number>.html in notice folder.
