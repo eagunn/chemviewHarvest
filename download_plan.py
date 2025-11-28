@@ -67,6 +67,7 @@ def _ensure_subfolder_path(cas_entry: Dict[str, Any], subfolder_name) -> Dict[st
     `subfolder_name` may be a Path, a slash/backslash-separated string, or a list of folder names.
     If subfolder_name is empty, return the cas_entry itself (top-level).
     """
+    logger.debug("Ensuring subfolder path: %s", subfolder_name)
     parts = _normalize_subpath(subfolder_name)
     current = cas_entry
     for part in parts:
@@ -102,6 +103,11 @@ def add_links_to_plan(plan: Dict[str, Any], cas_dir: Path, subfolder_name, links
     logger.debug("in add_links_to_plan: cas_dir=%s, subfolder_name=%s, num_links=%d", cas_dir, subfolder_name, len(links))
     global DOWNLOAD_PLAN_ACCUM, DOWNLOAD_PLAN_ACCUM_CAS_SET, DOWNLOAD_PLAN_ACCUM_CAS_SINCE_WRITE
     if not links:
+        logger.warning("No links to add to plan")
+        return 0, 0
+
+    if not cas_dir and not subfolder_name:
+        logger.error("Both cas_dir and subfolder_name are empty; cannot determine CAS folder")
         return 0, 0
 
     # Normalize the incoming subfolder representation into path parts
@@ -112,7 +118,8 @@ def add_links_to_plan(plan: Dict[str, Any], cas_dir: Path, subfolder_name, links
     relative_parts = []
 
     if cas_dir:
-        # Legacy path: cas_dir provided as Path; prefer that CAS folder name
+        # Legacy path: cas_dir provided as Path; prefer that folder name
+        logger.debug("Using provided cas_dir for CAS folder name: %s", cas_dir)
         cas_folder_name = Path(cas_dir).name
         # If caller passed a full path in subfolder_name that contains the CAS folder,
         # strip everything up to and including that CAS segment so we only use the tail as relative parts.
@@ -125,21 +132,21 @@ def add_links_to_plan(plan: Dict[str, Any], cas_dir: Path, subfolder_name, links
                 relative_parts = parts
     else:
         # No cas_dir provided: expect the subfolder_name to include the CAS folder.
-        # Try to find a part that looks like a CAS folder, prefer explicit 'CAS-' prefix.
+        logger.debug("No cas_dir provided; extracting CAS folder name from subfolder_name parts")
+        # Try to find a part that looks like a CAS folder. This is tricky. The don't all start
+        # CAS-. But, I do believe that at this stage in the process, they are the only part of
+        # the folder tree that would contain a hyphen. So we can use that as a heuristic.
         cas_idx = None
         for i, p in enumerate(parts):
-            if p.upper().startswith('CAS-'):
+            # test if the part contains a hyphen (common in CAS folder names)
+            if '-' in p:
+                logger.debug("Found CAS-like segment '%s' at index %d", p, i)
                 cas_idx = i
                 break
         if cas_idx is None:
-            # Fallback heuristics: if second part looks like CAS- use it, else use first part
-            if len(parts) >= 2 and parts[1].upper().startswith('CAS-'):
-                cas_idx = 1
-            elif len(parts) >= 1 and parts[0].upper().startswith('CAS-'):
-                cas_idx = 0
-            else:
-                cas_idx = 0
-                logger.warning("cas_dir not provided and no 'CAS-' segment found in subfolder path; using first segment '%s' as CAS folder", parts[0] if parts else '')
+            logger.error("Could not find CAS folder segment in subfolder_name: %s", subfolder_name)
+            return 0, 0
+
         # Build CAS folder name and the relative trailing parts
         cas_folder_name = parts[cas_idx] if parts else ''
         relative_parts = parts[cas_idx+1:] if parts else []
