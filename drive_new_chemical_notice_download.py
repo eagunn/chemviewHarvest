@@ -18,22 +18,22 @@ import re
 from pathlib import Path
 from typing import Dict, Any, Optional
 import download_plan
-from HarvestDB import HarvestDB
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, parse_qsl, urlencode, urlunparse
 
 logger = logging.getLogger(__name__)
 
-# Initialize shared download plan module for this driver. The folder name is the only
-# driver-specific configuration required here; other drivers may call download_plan.init
-# with a different folder if needed.
-download_plan.init(folder='chemview_archive_ncn', out_dir=Path('downloadsToDo'), batch_size=25)
-atexit.register(download_plan.flush)
+# Do not initialize download_plan at import time (avoids hard-coding the folder
+# name and circular imports). Initialize lazily on first driver invocation using
+# the `cas_dir` value the framework passes in (derived from Config.archive_root).
+_DOWNLOAD_PLAN_INITIALIZED = False
+_DOWNLOAD_PLAN_DEFAULT_FOLDER = 'chemview_archive_ncn'
 
 
-def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, file_types: Any = None, retry_interval_hours: float = 12.0) -> Dict[str, Any]:
+def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, file_types: Any = None, retry_interval_hours: float = 12.0, archive_root=None) -> Dict[str, Any]:
     """ Walk the browser through the web pages and modals we need to capture
     and from which we will download supporting files.
     """
+    logger.debug("In drive_new_chemical_notice_download with url=%s, cas_val=%s, cas_dir=%s, archive_root=%s", url, cas_val, cas_dir, archive_root)
     result: Dict[str, Any] = {
         'CAS:': cas_val,
         'attempted': False,
@@ -55,6 +55,7 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
         result['pdf']['error'] = msg
         return result
 
+    # Use db records to determine if we should try/retry this download now
     need_html = db.need_download(cas_val, file_types.new_chemical_notice_html, retry_interval_hours=retry_interval_hours)
     need_pdf = db.need_download(cas_val, file_types.new_chemical_notice_pdf, retry_interval_hours=retry_interval_hours)
 
@@ -68,8 +69,20 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
     debug_out = Path(debug_out)
     debug_out.mkdir(parents=True, exist_ok=True)
     if cas_dir is None:
-        # TODO: should this be an outright failure?
-        cas_dir = Path(".")
+        logger.error("cas_dir is required")
+        return result
+
+    # Lazy-initialize the download_plan using the configured 
+	# archive root folder.
+    global _DOWNLOAD_PLAN_INITIALIZED
+    if not _DOWNLOAD_PLAN_INITIALIZED:
+        try:
+            folder_name = archive_root
+        except Exception:
+            folder_name = _DOWNLOAD_PLAN_DEFAULT_FOLDER
+        download_plan.init(folder=folder_name, out_dir=Path('downloadsToDo'), batch_size=25)
+        atexit.register(download_plan.flush)
+        _DOWNLOAD_PLAN_INITIALIZED = True
 
     logger.info("Start of processing for URL: %s", url)
 
@@ -88,9 +101,11 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
     # but will need to set 'success' to True on completed, confirmed successes.
 
     # 21 Nov 25: We have started collecting and saving a basic set of chemical
-    # info in the db. We have already 2 of the three bits we want, Cas # and chem_id
-    # in the URL, save them and we will try to add chemical name later.
-    result = get_chem_info_ids(url, cas_val, result)
+    # info in the db. At this point, we already have 2 of the three bits we
+    # want: Cas # and chem_id. Pull them from the URL
+    # 26 Nov 25: Doing this revealed that our failing URLs were missing the ch=cas_val
+    # parameter, so we now repair the URL if needed and always return it.
+    result, url = validate_url_and_get_chem_info_ids(url, cas_val, result)
 
     nav_ok = navigate_to_chemical_overview_modal(page, url, db)
     if nav_ok:
@@ -203,16 +218,27 @@ def scrape_modal_and_get_downloads(page, cas_dir, ncn_link, idx, need_html: bool
         notice_span = visible_modal_locator.locator('span#Notice_Number').first
         if notice_span.count() > 0:
             raw_notice = notice_span.inner_text().strip()
-            # Sanitize for filename: keep alphanum, dash, underscore
-            notice_number = re.sub(r'[^A-Za-z0-9\-_]', '_', raw_notice)
-            logger.debug(f"Extracted and sanitized notice number: {notice_number}")
+            logger.debug(f"Using raw notice number: {raw_notice}")
         else:
             logger.warning("Notice number span not found in modal")
+			# TODO: the following worked for PMN, not yet tested for NCN
+            # will attempt to get number from anchor tag instead
+            anchor = visible_modal_locator.locator(
+                "div.snur_meta:has(span#NCN_Number_label) a.show_external_link").first
+            if anchor.count() > 0:
+                raw_notice = anchor.inner_text().strip()
+                logger.debug(f"Using raw anchor ncn number: {raw_notice}")
+            else:
+                logger.warning("ncn number anchor not found in modal, will fall back to item number")
     except Exception as e:
         logger.warning(f"Error extracting notice number: {e}")
-    if notice_number is None:
+    if raw_notice is not None:
+        # Sanitize for filename: keep alphanum, dash, underscore
+        notice_number = re.sub(r'[^A-Za-z0-9\-_]', '_', raw_notice)
+        logger.debug(f"Extracted and sanitized notice number: {notice_number}")
+    else:
         notice_number = f"item_{idx}"
-        logger.debug(f"Falling back to default notice number: {notice_number}")
+        logger.debug(f"Falling back to default using item number for notice number: {notice_number}")
 
     # Extract the html from visible_modal_locator and save it to a file named
     # ncn_<notice_number>.html in notice folder.
@@ -239,7 +265,7 @@ def scrape_modal_and_get_downloads(page, cas_dir, ncn_link, idx, need_html: bool
             logger.debug("Extracted chemical name from modal: %s", chem_name)
             result['chem_info']['chem_name'] = chem_name
         else:
-            logger.warning("Chemical name elementnot found in modal")
+            logger.warning("Chemical name element not found in modal")
     except Exception as e:
         logger.warning(f"Error saving modal HTML: {e}")
 
@@ -252,6 +278,8 @@ def scrape_modal_and_get_downloads(page, cas_dir, ncn_link, idx, need_html: bool
             # Store the zip files in a subfolder of the notice folder
             ncn_subfolder = f"{cas_dir}/{notice_number}/supporting_docs"
             download_plan.add_links_to_plan(download_plan.DOWNLOAD_PLAN_ACCUM, "", ncn_subfolder, zip_link_list)
+        else:
+            logger.warning("No supporting doc links found")
 
     # Close the modal using a robust locator and auto-wait
     # Close button resides in a sibling div to modal-body, so navigate up to modal-content first
@@ -268,10 +296,13 @@ def scrape_modal_and_get_downloads(page, cas_dir, ncn_link, idx, need_html: bool
 
     return True
 
-def get_chem_info_ids(url, cas_val, result):
-    """Extract two values from the url:
+def validate_url_and_get_chem_info_ids(url, cas_val, result):
+    """Extract two values from the url, if we can:
     - chem_id: which we then sanity check against the cas_val
     - chem_db_id: extracted from modalId= in the URL
+
+    If chem_id is not found, then the url is defective (we are seeing this for most/all
+    chemicals with non-numeric cas_vals) and we need to repair it.
 
     It is somewhat speculative to conclude that the modalId= value is the internal
     chemview database id for the chemical, but this seems relatively likely given the fact
@@ -308,14 +339,19 @@ def get_chem_info_ids(url, cas_val, result):
                 # if they don't match, use the primary value we trust: cas_val
                 chem_id = cas_val
         else:
-            logger.warning("No chem_id found in URL")
+            logger.info("No chem_id found in URL, will insert cas_val in URL and use for chem_id")
+            chem_id = cas_val
+            # Repair the URL by adding ch=<cas_val>
+            params = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if k.lower() != 'ch']
+            params.append(('ch', cas_val))
+            url = urlunparse(parsed._replace(query=urlencode(params, doseq=True)))
     except Exception:
         logger.exception("Exception while extracting ids from URL: %s", url)
 
     result['chem_info']['chem_id'] = chem_id
     result['chem_info']['chem_db_id'] = chem_db_id
 
-    return result
+    return result, url
 
 
 def find_anchor_links_on_chemical_overview_modal(page):

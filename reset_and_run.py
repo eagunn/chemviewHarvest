@@ -18,14 +18,14 @@ def run_harvest_script():
         command = [
             'python',
             './harvestPremanufactureNotice.py',
-            #'--headless',
+            '--headless',
             #'--input-file', './input_files/srExportTest1.csv',
             #'--start-row', '214',
             '--max-downloads', '1'
         ]
         print("About to execute command:", ' '.join(command))
         subprocess.run(command, check=True)
-        print("harvestSubstantialRisk.py executed successfully.")
+        print("command executed successfully.")
     except subprocess.CalledProcessError as e:
         print(f"Error running harvestSubstantialRisk.py: {e}")
 
