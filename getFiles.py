@@ -22,8 +22,6 @@ def makeAndChangeToFolder(folderName):
         logger.debug(f"Made new folder and will change to it: {os.getcwd()}")
     os.chdir(folderName)
 
-
-
 def extract_filename_from_url(downloadURL: str) -> str:
     """Extract a safe filename from a URL.
 
@@ -132,6 +130,8 @@ def getOneFile(downloadURL, stats):
                 if stats["downloadCount"] % 10 == 0:
                     # don't write this to log file, want to see in the terminal
                     print("proof of life, download count is:", stats["downloadCount"])
+            # FWIW: I don't think these two else clauses ever get hit because the
+            # raise_for_status() invokes an exception for any non-200 status codes.
             elif response.status_code == 404:
                 logger.warning("File not found: %s", downloadURL)
             else:
@@ -139,6 +139,7 @@ def getOneFile(downloadURL, stats):
         except requests.exceptions.MissingSchema as e:
             logger.error("Error: Invalid URL - %s", e)
         except requests.exceptions.RequestException as e:
+            # The 404 errors definitely get caught here
             logger.error("Error during download: %s", e)
         except OSError as e:
             logger.error("Error saving file: %s", e)
