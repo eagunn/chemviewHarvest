@@ -17,10 +17,8 @@ def run_harvest_script():
     try:
         command = [
             'python',
-            './harvestPremanufactureNotice.py',
+            './harvestSection5.py',
             '--headless',
-            #'--input-file', './input_files/srExportTest1.csv',
-            #'--start-row', '214',
             '--max-downloads', '1'
         ]
         print("About to execute command:", ' '.join(command))
