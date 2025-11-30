@@ -29,6 +29,36 @@ _DOWNLOAD_PLAN_INITIALIZED = False
 _DOWNLOAD_PLAN_DEFAULT_FOLDER = 'chemview_archive_ncn'
 
 
+def fixup_back_zip_links(zip_link_list):
+    """Normalize a list of back-end ZIP URLs in-place and return the new list.
+    We've been seeing bad urls like:
+    https://chemview.epa.gov/chemview/admin/proxy?filename=20200213%2FP-20-0015%2FP-20-0015_5.zip&mediaType=zip&mediaType=zip
+    The double mediaType parameter appears to be harmless, but the 'admin' path segment
+    is wrong. The downloads for these urls always fail with 404. If we take "/admin" out of the path,
+    then the downloads succeed.
+
+    Keeps the original query string intact so percent-encoded parts remain.
+    """
+    fixed = []
+    for u in zip_link_list:
+        try:
+            parsed = urlparse(u.strip())
+            path = parsed.path or ''
+            # Remove any path segments equal to 'admin' (case-insensitive)
+            parts = [p for p in path.split('/') if p and p.lower() != 'admin']
+            new_path = ('/' if path.startswith('/') else '') + '/'.join(parts)
+            # Collapse repeated slashes
+            new_path = re.sub(r'/+', '/', new_path)
+            rebuilt = urlunparse((parsed.scheme, parsed.netloc, new_path, parsed.params, parsed.query, parsed.fragment))
+            if rebuilt != u:
+                logger.debug("fixup_back_zip_links: fixed %s -> %s", u, rebuilt)
+            fixed.append(rebuilt)
+        except Exception:
+            logger.exception("fixup_back_zip_links: error processing %s", u)
+            fixed.append(u)
+    return fixed
+
+
 def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, file_types: Any = None, retry_interval_hours: float = 12.0, archive_root=None) -> Dict[str, Any]:
     """ Walk the browser through the web pages and modals we need to capture
     and from which we will download supporting files.
@@ -213,6 +243,7 @@ def scrape_modal_and_get_downloads(page, cas_dir, ncn_link, idx, need_html: bool
         return None
 
     notice_number = None
+    raw_notice = None
     try:
         notice_span = visible_modal_locator.locator('span#Notice_Number').first
         if notice_span.count() > 0:
@@ -220,7 +251,6 @@ def scrape_modal_and_get_downloads(page, cas_dir, ncn_link, idx, need_html: bool
             logger.debug(f"Using raw notice number: {raw_notice}")
         else:
             logger.warning("Notice number span not found in modal")
-			# TODO: the following worked for PMN, not yet tested for NCN
             # will attempt to get number from anchor tag instead
             anchor = visible_modal_locator.locator(
                 "div.snur_meta:has(span#NCN_Number_label) a.show_external_link").first
@@ -272,10 +302,12 @@ def scrape_modal_and_get_downloads(page, cas_dir, ncn_link, idx, need_html: bool
     if need_pdf and zip_locator is not None:
         logger.debug("Finding ZIP download links in the modal")
         zip_link_list = zip_locator.evaluate_all("anchors => anchors.map(a => a.href)")
+        # Fix up any backend/admin proxy URL oddities (remove 'admin' path segments, etc.)
+        zip_link_list = fixup_back_zip_links(zip_link_list)
         logger.info("Found %d ZIP download links", len(zip_link_list))
         if (len(zip_link_list) > 0):
             # Store the zip files in a subfolder of the notice folder
-            ncn_subfolder = f"{cas_dir}/{notice_number}/supporting_docs"
+            ncn_subfolder = cas_dir / notice_number / 'supporting_docs'
             download_plan.add_links_to_plan(download_plan.DOWNLOAD_PLAN_ACCUM, "", ncn_subfolder, zip_link_list)
         else:
             logger.warning("No supporting doc links found")
