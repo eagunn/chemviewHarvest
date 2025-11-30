@@ -31,7 +31,6 @@ def drive_premanufacture_notice_download(url, cas_val, cas_dir: Path, debug_out=
     """ Walk the browser through the web pages and modals we need to capture
     and from which we will download supporting files.
     """
-    logger.debug("In drive_premanufacture_notice_download with url=%s, cas_val=%s, cas_dir=%s, archive_root=%s", url, cas_val, cas_dir, archive_root)
     result: Dict[str, Any] = {
         'CAS:': cas_val,
         'attempted': False,
@@ -117,7 +116,7 @@ def drive_premanufacture_notice_download(url, cas_val, cas_dir: Path, debug_out=
                  if need_pdf and scrape_success:
                      # declare success here for "pdf" / zip downloads
                      result['pdf']['success'] = True
-                     result['pdf']['local_file_path'] = str(cas_dir / "*_supporting_docs")
+                     result['pdf']['local_file_path'] = str(cas_dir / "supporting_docs")
                      result['pdf']['navigate_via'] = url
                  # else: if we didn't find a list we are going to log this as a failure below
         else:
