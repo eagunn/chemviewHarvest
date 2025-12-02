@@ -28,37 +28,6 @@ logger = logging.getLogger(__name__)
 _DOWNLOAD_PLAN_INITIALIZED = False
 _DOWNLOAD_PLAN_DEFAULT_FOLDER = 'chemview_archive_Section5'
 
-
-def fixup_back_zip_links(zip_link_list):
-    """Normalize a list of back-end ZIP URLs in-place and return the new list.
-    We've been seeing bad urls like:
-    https://chemview.epa.gov/chemview/admin/proxy?filename=20200213%2FP-20-0015%2FP-20-0015_5.zip&mediaType=zip&mediaType=zip
-    The double mediaType parameter appears to be harmless, but the 'admin' path segment
-    is wrong. The downloads for these urls always fail with 404. If we take "/admin" out of the path,
-    then the downloads succeed.
-
-    Keeps the original query string intact so percent-encoded parts remain.
-    """
-    fixed = []
-    for u in zip_link_list:
-        try:
-            parsed = urlparse(u.strip())
-            path = parsed.path or ''
-            # Remove any path segments equal to 'admin' (case-insensitive)
-            parts = [p for p in path.split('/') if p and p.lower() != 'admin']
-            new_path = ('/' if path.startswith('/') else '') + '/'.join(parts)
-            # Collapse repeated slashes
-            new_path = re.sub(r'/+', '/', new_path)
-            rebuilt = urlunparse((parsed.scheme, parsed.netloc, new_path, parsed.params, parsed.query, parsed.fragment))
-            if rebuilt != u:
-                logger.debug("fixup_back_zip_links: fixed %s -> %s", u, rebuilt)
-            fixed.append(rebuilt)
-        except Exception:
-            logger.exception("fixup_back_zip_links: error processing %s", u)
-            fixed.append(u)
-    return fixed
-
-
 def drive_section5_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, file_types: Any = None, retry_interval_hours: float = 12.0, archive_root=None) -> Dict[str, Any]:
     """ Walk the browser through the web pages and modals we need to capture
     and from which we will download supporting files.

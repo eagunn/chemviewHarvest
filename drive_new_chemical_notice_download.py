@@ -6,7 +6,7 @@ Driver module implementing the New Chemical Notice specific navigation and scrap
 This module is invoked by `harvestNewChemicalNotice.py` via the shared
 `harvest_framework.run_harvest` function. It contains the Playwright-driven
 logic to open modals, scrape HTML, gather download links, and add entries to
-a download plan which will be processed later by a sepaate script.
+a download plan which will be processed later by a separate script.
 We use`HarvestDB` (via the db object passed from the framework) for
 read/write of success/failure records.
 """
