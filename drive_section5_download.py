@@ -139,9 +139,7 @@ def drive_section5_download(url, cas_val, cas_dir: Path, debug_out=None, headles
     nav_ok = navigate_to_chemical_overview_modal(page, url, db)
     if nav_ok:
         section5_list = find_anchor_links_on_chemical_overview_modal(page)
-        if len(section5_list) > 1:
-            logger.warning("more than one CO link found on modal; will process all %d", len(section5_list))
-         # Process Section5 links which should each have a modal and some zips to harvest
+        # Process Section5 links which should each have a modal and one pdf to harvest
         if section5_list and len(section5_list) > 0:
              for idx, section5_link in enumerate(section5_list, start=1):
                  # Scrape the modal and get the zip download links
@@ -211,6 +209,7 @@ def scrape_modal_and_get_downloads(page, cas_dir, section5_link, idx, need_html:
         return None
 
     # --- 1. Click the anchor to bring up the specfic report modal ---
+    logger.debug("In scrape_modal_and_get_downloads for section5 link %s:", section5_link)
     try:
         # Use Playwright auto-waiting click on the Locator
         section5_link.click(timeout=30000)
@@ -238,13 +237,27 @@ def scrape_modal_and_get_downloads(page, cas_dir, section5_link, idx, need_html:
         logger.warning("Exception waiting for visible modal: %s", e)
         return None
 
-    # Extract the html from visible_modal_locator and save it to a file named
-    # section5Summary in the section_5 folder.
-    notice_dir = None
+    # Extract the html and other values from visible_modal_locator. and save it to a file named
+    # Since we can have more than one consent order for a chemical, we create an
+    # extra layer of subfolder based on the PMN number which AFAICS, each modal contains.
     try:
         modal_html = visible_modal_locator.evaluate("el => el.outerHTML")
-        # Create/ensure a folder for section 5 consent orders
-        section5_dir = cas_dir
+        pmn_number = None
+        # Extract PMN number from the modal HTML
+        m = re.search(r'<span[^>]*\bid=["\']PMN_Number["\'][^>]*>(.*?)</span>', modal_html, re.IGNORECASE | re.DOTALL)
+        if m:
+            pmn_number = m.group(1).strip()
+            logger.debug("Extracted PMN number from modal HTML: %s", pmn_number)
+            # preserve in result for downstream use
+            result.setdefault('chem_info', {})['pmn_number'] = pmn_number
+        else:
+            logger.error("PMN_Number span not found in modal HTML")
+            # if we don't have a PMN number, use the item number instead
+            pmn_number = f"item-{idx}"
+
+        # Create/ensure a folder for this Section5 item
+        section5_dir = cas_dir / pmn_number
+        logger.debug("Section5 dir: %s", section5_dir)
         section5_dir.mkdir(parents=True, exist_ok=True)
         html_path = section5_dir / f"section5_summary.html"
         with open(html_path, 'w', encoding='utf-8') as fh:
@@ -286,9 +299,9 @@ def scrape_modal_and_get_downloads(page, cas_dir, section5_link, idx, need_html:
             if (len(pdf_link_list) > 0):
                 download_plan.add_links_to_plan(download_plan.DOWNLOAD_PLAN_ACCUM, "", section5_dir, pdf_link_list)
             else:
-                logger.warning("No consent order link found for cas_val %s", cas_dir.name)
+                logger.warning("No consent order link found for %s / %s", result['chem_info']['chem_id'], pmn_number)
         else:
-            logger.info("No consent order link present in this modal for cas_val %s", cas_dir.name)
+            logger.warning("No pdf locator found for %s / %s", result['chem_info']['chem_id'], pmn_number)
 
     # Close the modal using a robust locator and auto-wait
     # Close button resides in a sibling div to modal-body, so navigate up to modal-content first

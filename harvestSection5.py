@@ -33,8 +33,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    #input_file: str = "input_files/chemviewS5export20251019.csv"
-    input_file: str = "input_files/s5ExportSamples.csv"
+    input_file: str = "input_files/chemviewS5export20251019.csv"
+    #input_file: str = "input_files/s5ExportSamples.csv"
+    #input_file: str = "input_files/s5ExportTest.csv"
     archive_root: str = "H:/openSource/dataPreservation/chemView/harvest/chemview_archive_section5"
     db_path: str = "chemview_harvest.db"
     headless: bool = False  # headless false means the browser will be displayed
