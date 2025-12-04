@@ -270,7 +270,7 @@ def scrape_modal_and_get_downloads(page, cas_dir, pmn_link, idx, need_html: bool
         # find all the href anchors in the modal
         anchor_list = visible_modal_locator.locator('a[href]').all()
         # We only want the ones that can be converted into pdf downloads
-        logger.info("Found %d file download links", len(anchor_list))
+        logger.info("Found %d href anchors", len(anchor_list))
         supporting_doc_list = []
         for i, anchor in enumerate(anchor_list):
             try:
@@ -278,50 +278,182 @@ def scrape_modal_and_get_downloads(page, cas_dir, pmn_link, idx, need_html: bool
                 href = anchor.get_attribute('href')
                 logger.debug("examining anchor text: %s, href: %s", text, href)
                 if text.startswith("https://www.regulations.gov/document?"):
-                    logger.debug("Found supporting doc link")
+                    logger.debug("Found link to supporting doc page: %s", href)
                     supporting_doc_list.append(anchor)
                 # else we ignore the other links
             except Exception:
                 logger.exception("Exception while processing anchor %d", i)
                 continue
         if (len(supporting_doc_list) > 0):
-            # We have to transform the found links, which are to a page on regulations.gov,
-            # and look like:
-            # https://www.regulations.gov/document?D=EPA-HQ-OPPT-2017-0366-0179
-            # into direct download links for the pdf files, which will look like:
-            # https://downloads.regulations.gov/EPA-HQ-OPPT-2017-0366-0179/content.pdf
-            pdf_link_list = []
-            for doc_anchor in supporting_doc_list:
+            logger.info(f"Found {len(supporting_doc_list)} supporting doc links")
+            # Collect href strings while the modal is still open (Locator objects become stale after navigation)
+            supporting_hrefs = []
+            for i, anchor in enumerate(supporting_doc_list):
                 try:
-                    href = doc_anchor.get_attribute('href')
-                    parsed = urlparse(href)
-                    qs = parse_qs(parsed.query)
-                    doc_ids = qs.get('D')
-                    if doc_ids and len(doc_ids) > 0:
-                        doc_id = doc_ids[0]
-                        pdf_link = f"https://downloads.regulations.gov/{doc_id}/content.pdf"
-                        pdf_link_list.append(pdf_link)
-                except Exception as e:
-                    logger.warning(f"Error parsing supporting doc link: {e}")
-                    # and we skip this doc
-            # Store the doc files in a subfolder of the notice folder
-            pmn_subfolder = f"{cas_dir}/{pmn_number}/supporting_docs"
-            download_plan.add_links_to_plan(download_plan.DOWNLOAD_PLAN_ACCUM, "", pmn_subfolder, pdf_link_list)
+                    href = anchor.get_attribute('href')
+                    if href:
+                        supporting_hrefs.append(href)
+                    else:
+                        logger.debug("Supporting anchor %d has no href", i)
+                except Exception:
+                    logger.exception("Exception while extracting href from supporting anchor %d", i)
+
+            # Close the ChemView modal before navigating away; locators will become stale after page.goto
+            try:
+                outer_content_locator = visible_modal_locator.locator('xpath=ancestor::div[contains(@class, "modal-content")]').first
+                close_btn = outer_content_locator.locator("a.close[data-dismiss='modal']").first
+                if close_btn is not None:
+                    logger.debug("Will try to close modal before navigating to supporting docs")
+                    try:
+                        close_btn.click()
+                        visible_modal_locator.wait_for(state="hidden", timeout=5000)
+                        logger.debug("Closed modal successfully before navigation")
+                    except Exception:
+                        logger.exception("Close button click or wait failed; attempting fallback hide script")
+                        try:
+                            page.evaluate("() => { $('.modal').modal('hide'); }")
+                        except Exception:
+                            logger.exception("Fallback script to hide modal failed")
+                else:
+                    logger.warning("Close button not found in modal before navigation; attempting fallback hide script")
+                    try:
+                        page.evaluate("() => { $('.modal').modal('hide'); }")
+                    except Exception:
+                        logger.exception("Fallback script to hide modal failed")
+            except Exception:
+                logger.exception("Exception while attempting to close modal before navigation")
+
+            pdf_link_list = []
+            # Iterate over href strings (safe across navigations)
+            for href in supporting_hrefs:
+                try:
+                    logger.info("Navigating to supporting doc page: %s", href)
+                    page.goto(href, wait_until="domcontentloaded", timeout=30000)
+                    # Short pause for resources to load
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        logger.debug("networkidle wait failed or timed out; continuing")
+
+                    # Wait for the expected button container to become visible if the page renders it dynamically
+                    try:
+                        page.wait_for_selector("div.btn-block", state="visible", timeout=15000)
+                        logger.debug("div.btn-block became visible")
+                    except Exception:
+                        logger.debug("div.btn-block not visible within timeout; will continue and try to find buttons directly")
+
+                    # Simplified: look specifically for anchors with classes 'btn btn-default btn-block'
+                    found_here = False
+                    try:
+                        btn_locator = page.locator('a.btn.btn-default.btn-block')
+                        btn_locator.first.wait_for(state="visible", timeout=10000)
+                        anchors = btn_locator.all()
+                        for a in anchors:
+                            try:
+                                dhref = a.get_attribute('href')
+                                if dhref:
+                                    pdf_link_list.append(dhref)
+                            except Exception:
+                                logger.exception("Exception reading href from download anchor")
+                        logger.info("Found %d downloadable files on regulation page using selector: a.btn.btn-default.btn-block", len(anchors))
+                        found_here = True
+                    except Exception:
+                        logger.debug("No 'a.btn.btn-default.btn-block' anchors found on page within timeout")
+
+                    # If not found in main page, fall back to scanning frames (commented out for now)
+                    # if not found_here:
+                    #     for frame in page.frames:
+                    #         try:
+                    #             frame_loc = frame.locator('a.btn.btn-default.btn-block')
+                    #             frame_loc.first.wait_for(state="visible", timeout=5000)
+                    #             anchors = frame_loc.all()
+                    #             for a in anchors:
+                    #                 try:
+                    #                     dhref = a.get_attribute('href')
+                    #                     if dhref:
+                    #                         pdf_link_list.append(dhref)
+                    #                 except Exception:
+                    #                     logger.exception("Exception reading href from frame anchor")
+                    #             logger.info("Found %d downloadable files in frame using selector: a.btn.btn-default.btn-block", len(anchors))
+                    #             found_here = True
+                    #             break
+                    #         except Exception:
+                    #             continue
+
+                    if not found_here:
+                        # Save debug artifacts to help diagnose (screenshot + HTML)
+                        try:
+                            debug_snap = notice_dir / "reg_page_debug.png"
+                            debug_html = notice_dir / "reg_page_debug.html"
+                            page.screenshot(path=str(debug_snap), full_page=True)
+                            with open(debug_html, "w", encoding='utf-8') as fh:
+                                fh.write(page.content())
+                            logger.error("No download buttons found; saved debug artifacts: %s, %s", debug_snap, debug_html)
+                        except Exception:
+                            logger.exception("Failed to save debug artifacts for regulation page")
+
+                except Exception:
+                    logger.exception("Exception while navigating to supporting doc page: %s", href)
+
+            logger.info("Total downloadable pdf links collected: %d", len(pdf_link_list))
+            # If we found downloadable links, add them to the shared download plan
+            if pdf_link_list:
+                try:
+                    # Group links by the leading path segment (e.g., 'EPA-HQ-OPPT-2017-0366-0163')
+                    groups = {}
+                    for dh in pdf_link_list:
+                        try:
+                            p = urlparse(dh)
+                            # path like: /EPA-HQ-OPPT-2017-0366-0163/content.pdf
+                            parts = [seg for seg in p.path.lstrip('/').split('/') if seg]
+                            if parts:
+                                identifier = parts[0]
+                            else:
+                                # fallback to hostname if path missing
+                                identifier = p.netloc.replace(':', '_')
+                            # sanitize identifier for filesystem
+                            identifier_safe = re.sub(r'[^A-Za-z0-9\-_]', '_', identifier)
+                            groups.setdefault(identifier_safe, []).append(dh)
+                        except Exception:
+                            logger.exception("Failed to parse/assign download URL to a group: %s", dh)
+                            groups.setdefault('unknown', []).append(dh)
+
+                    total_added = 0
+                    total_skipped = 0
+                    for identifier_safe, links in groups.items():
+                        try:
+                            # Determine cas_parent_dir (the CAS- folder) and relative subfolder
+                            try:
+                                cas_parent_dir = cas_dir.parent if cas_dir is not None else None
+                            except Exception:
+                                cas_parent_dir = None
+
+                            data_type_folder = cas_dir.name if cas_dir is not None else 'premanufactureNotices'
+                            relative_subfolder = f"{data_type_folder}/{pmn_number}/supporting_docs/{identifier_safe}"
+
+                            logger.debug("Adding to plan: cas_parent_dir=%s, relative_subfolder=%s, links=%d", cas_parent_dir, relative_subfolder, len(links))
+
+                            # Pass cas_parent_dir so add_links_to_plan creates the CAS- entry correctly
+                            added, skipped = download_plan.add_links_to_plan(download_plan.DOWNLOAD_PLAN_ACCUM, cas_parent_dir, relative_subfolder, links)
+                            logger.debug("Added %d links to download plan under %s, skipped %d duplicates", added, relative_subfolder, skipped)
+                            total_added += added
+                            total_skipped += skipped
+                        except Exception:
+                            logger.exception("Failed to add group %s to download plan", identifier_safe)
+
+                    logger.info("Total links added to plan: %d, total duplicates skipped: %d", total_added, total_skipped)
+                    # Mark pdf success in result when links are queued (if any were added)
+                    if total_added > 0:
+                        result['pdf']['success'] = True
+                        result['pdf']['local_file_path'] = str(cas_dir / pmn_number / "supporting_docs")
+                        result['pdf']['navigate_via'] = page.url
+                except Exception:
+                    logger.exception("Failed to add pdf links to download plan")
         else:
             logger.warning("No supporting doc links found")
 
-    # Close the modal using a robust locator and auto-wait
-    # Close button resides in a sibling div to modal-body, so navigate up to modal-content first
-    outer_content_locator = visible_modal_locator.locator(
-        'xpath=ancestor::div[contains(@class, "modal-content")]').first
-    close_btn = outer_content_locator.locator("a.close[data-dismiss='modal']").first
-    if close_btn is not None:
-        logger.debug("Will try to close modal")
-        close_btn.click()
-        visible_modal_locator.wait_for(state="hidden", timeout=5000)
-        logger.debug("Closed modal successfully")
-    else:
-        logger.warning("Close button not found in modal; skipping close")
+
+
 
     return True
 
