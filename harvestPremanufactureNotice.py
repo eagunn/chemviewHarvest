@@ -6,11 +6,11 @@ Entrypoint wrapper to harvest Premanufacture Notice (PMN) pages from EPA ChemVie
 This module is a thin wrapper that is invoked by the user (CLI). It:
 - Builds a `Config` object from defaults and command-line arguments.
 - Configures centralized logging via `logging_setup.initialize_logging`.
-- Calls `harvest_framework.run_harvest`, passing the `drive_new_chemical_notice_download` driver
+- Calls `harvest_framework.run_harvest`, passing the `drive_premanufacture_notice_download` driver
   and the `FileTypes` policy object.
 
 Relationships:
-- Calls: `harvest_framework.run_harvest`, `drive_new_chemical_notice_download.drive_new_chemical_notice_download`,
+- Calls: `harvest_framework.run_harvest`, `drive_premanufacture_notice_download.drive_premanufacture_notice_download`,
   and `logging_setup.initialize_logging`.
 - Is called by: the user (e.g., `python harvestPremanufactureNotice.py ...`) as the top-level script.
 
