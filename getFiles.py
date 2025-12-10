@@ -148,6 +148,8 @@ def getOneFile(downloadURL, stats):
         if downloadOk == False:
             stats["errorCount"] += 1
 
+# NB: This function has not been tested in a long, long time
+# if ever. So watch it like a hawk if you want to use it.
 def savePage(pageToSave):
     logger.info("in savePage for: %s", pageToSave["url"])
     if os.path.exists(pageToSave["filename"]):

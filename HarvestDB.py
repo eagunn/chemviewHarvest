@@ -10,17 +10,17 @@
 # worked out in Gemini, overseen and tested by AG
 
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Optional, Dict, Any, Tuple
 import logging
-from file_types import FileTypes
+import re
 
 logger = logging.getLogger(__name__)
 
 # --- Configuration ---
-#DATABASE_FILE = 'chemview_harvest.db'
+DATABASE_FILE = 'chemview_harvest.db'
 # ************ DEV ONLY ************
-DATABASE_FILE = 'chemview_test.db'
+#DATABASE_FILE = 'chemview_test.db'
 TABLE_NAME = 'harvest_log'
 DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
 
@@ -156,50 +156,115 @@ class HarvestDB:
             logger.error("Error deleting ecords for chemical_id %s: %s", chemical_id, e, exc_info=True)
             return False
 
-    def need_download(self, chemical_id: str, file_type: str, retry_interval_hours: float = 12.0) -> bool:
+    def need_download(self, chemical_id: str, file_type: str, retry_interval_hours: float = 12.0, success_cutoff_date: Optional[str] = None) -> bool:
         """
         Determine whether a download should be attempted for the given chemical_id and file_type.
 
         Policy:
         - If no record exists: return True
-        - If a record has last_success_datetime (any success): return False
+        - If a record has last_success_datetime (any success) and no success_cutoff_date: return False
+        - If success_cutoff_date is provided: if last_success_datetime is older than cutoff => return True (force retry)
         - If no last_success and no last_failure: return True
         - If last_failure is within retry_interval_hours: return False
         - Otherwise return True (old failure)
         """
+        do_need_return = False
+
         record = self.get_harvest_status(chemical_id, file_type)
         if not record:
             logger.debug("No record found for %s / %s; download needed", chemical_id, file_type)
-            return True
+            do_need_return = True
+        else:
+            last_success = record.get('last_success_datetime')
+            last_failure = record.get('last_failure_datetime')
 
-        last_success = record.get('last_success_datetime')
-        last_failure = record.get('last_failure_datetime')
+            # If there is a recorded success, honor it unless a cutoff date requests a retry
+            if last_success:
+                if success_cutoff_date:
+                    # Validate format YYYY-MM-DD using regex before parsing
+                    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", success_cutoff_date):
+                        logger.error(
+                            "Invalid success_cutoff_date format for %s / %s: %s; expected YYYY-MM-DD",
+                            chemical_id, file_type, success_cutoff_date
+                        )
+                        do_need_return = False
+                    else:
+                        cutoff_date = date.fromisoformat(success_cutoff_date)
 
-        if last_success:
-            logger.debug("Found prior success for %s / %s; no download needed", chemical_id, file_type)
-            return False
-
-        if not last_failure:
-            logger.debug("No prior failure recorded for %s / %s; download needed", chemical_id, file_type)
-            return True
-
-        # Parse the stored failure datetime. The DB stores strings using DATE_FORMAT.
-        try:
-            if isinstance(last_failure, str):
-                last_failure_dt = datetime.strptime(last_failure, DATE_FORMAT)
+                        # Parse stored last_success (DB stores full datetime string) if it's a string,
+                        # otherwise assume it's already a datetime-like object and try to get its date().
+                        if isinstance(last_success, str):
+                            try:
+                                last_success_dt = datetime.strptime(last_success, DATE_FORMAT)
+                            except Exception:
+                                logger.exception(
+                                    "Failed to parse last_success_datetime for %s / %s; skipping retry",
+                                    chemical_id, file_type
+                                )
+                                do_need_return = False
+                            else:
+                                do_need_return = cutoff_date > last_success_dt.date()
+                                if do_need_return:
+                                    logger.debug(
+                                        "Prior success for %s / %s is older than cutoff %s; forcing download",
+                                        chemical_id, file_type, success_cutoff_date
+                                    )
+                                else:
+                                    logger.debug(
+                                        "Prior success for %s / %s is newer than or equal to cutoff %s; no download needed",
+                                        chemical_id, file_type, success_cutoff_date
+                                    )
+                        else:
+                            # last_success is likely a datetime-like object
+                            try:
+                                ls_date = last_success.date()
+                            except Exception:
+                                logger.exception(
+                                    "Unexpected last_success type for %s / %s; skipping retry",
+                                    chemical_id, file_type
+                                )
+                                do_need_return = False
+                            else:
+                                do_need_return = cutoff_date > ls_date
+                                if do_need_return:
+                                    logger.debug(
+                                        "Prior success for %s / %s is older than cutoff %s; forcing download",
+                                        chemical_id, file_type, success_cutoff_date
+                                    )
+                                else:
+                                    logger.debug(
+                                        "Prior success for %s / %s is newer than or equal to cutoff %s; no download needed",
+                                        chemical_id, file_type, success_cutoff_date
+                                    )
+                else:
+                    # no cutoff provided: do not download
+                    logger.debug("Found prior success for %s / %s; no download needed", chemical_id, file_type)
+                    do_need_return = False
             else:
-                last_failure_dt = last_failure
-        except Exception:
-            logger.exception("Failed to parse last_failure_datetime for %s / %s", chemical_id, file_type)
-            # conservative: if we can't parse the timestamp, do not retry
-            return False
+                # no prior success
+                if not last_failure:
+                    logger.debug("No prior failure recorded for %s / %s; download needed", chemical_id, file_type)
+                    do_need_return = True
+                else:
+                    # Parse the stored failure datetime. The DB stores strings using DATE_FORMAT.
+                    try:
+                        if isinstance(last_failure, str):
+                            last_failure_dt = datetime.strptime(last_failure, DATE_FORMAT)
+                        else:
+                            last_failure_dt = last_failure
+                    except Exception:
+                        logger.exception("Failed to parse last_failure_datetime for %s / %s", chemical_id, file_type)
+                        # conservative: if we can't parse the timestamp, do not retry
+                        do_need_return = False
+                    else:
+                        if datetime.now() - last_failure_dt > timedelta(hours=retry_interval_hours):
+                            logger.debug("Prior failure for %s / %s is older than threshold; download needed", chemical_id, file_type)
+                            do_need_return = True
+                        else:
+                            logger.debug("Prior failure for %s / %s is too recent; skipping download", chemical_id, file_type)
+                            do_need_return = False
 
-        if datetime.now() - last_failure_dt > timedelta(hours=retry_interval_hours):
-            logger.debug("Prior failure for %s / %s is older than threshold; download needed", chemical_id, file_type)
-            return True
-
-        logger.debug("Prior failure for %s / %s is too recent; skipping download", chemical_id, file_type)
-        return False
+        return do_need_return
 
     def save_chemical_info(self, chemical_id: str, database_id: str, name: str) -> bool:
         """
@@ -250,10 +315,9 @@ class HarvestDB:
                 conn.close()
 
 
-# Module-level helper for backwards-compatible calls. Accepts either:
-# - a HarvestDB instance
-# - an object exposing get_harvest_status(chemical_id, file_type)
-# - a path to the sqlite DB file (str)
+# Module-level helper for backwards-compatible calls.
+# TODO: get rid of this. AFAICS, only drive_substantial_risk_download.py uses it.
+# So, next time we work on that code, we should refactor to call HarvestDB methods directly.
 def need_download_from_db(db_backend: Optional[Any], chemical_id: str, file_type: str, retry_interval_hours: float = 12.0) -> bool:
     if db_backend is None:
         logger.error("need_download_from_db called with no db_backend")
@@ -296,8 +360,3 @@ def need_download_from_db(db_backend: Optional[Any], chemical_id: str, file_type
     except Exception:
         logger.exception("Failed to instantiate HarvestDB from db_backend; cannot determine need_download")
         return False
-
-
-
-# Example usage / test harness moved to testDB.py to keep this module import-safe.
-# Run `python testDB.py` to execute the HarvestDB tests.

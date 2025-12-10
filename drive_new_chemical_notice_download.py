@@ -1,24 +1,33 @@
 """
-drive_new_chemical_notice_download.py
+drive_ncn_download.py
 
-Driver module implementing the New Chemical Notice specific navigation and scraping.
+HTTP-based driver skeleton for New Chemical Notice (NCN) harvesting.
+This is a complete rewrite of the prior Playwright-based driver, using
+requests + Beautiful Soup instead.
+It is based on an excellent analysis of the json and http calls made
+by the ChemView webapp, contributed by Michael Cohen, Dec 2025.
 
 This module is invoked by `harvestNewChemicalNotice.py` via the shared
-`harvest_framework.run_harvest` function. It contains the Playwright-driven
-logic to open modals, scrape HTML, gather download links, and add entries to
+`harvest_framework.run_harvest` function. It contains the Beautiful Soup (BS4)
+logic to retrieve json and modals, scrape HTML, gather download links, and add entries to
 a download plan which will be processed later by a separate script.
 We use`HarvestDB` (via the db object passed from the framework) for
 read/write of success/failure records.
 """
 
-
 import atexit
-import logging
-import re
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional, Union
+import logging
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, parse_qsl
+import time
+import re
 import download_plan
-from urllib.parse import urlparse, parse_qs, parse_qsl, urlencode, urlunparse
+
+# External deps (ensure installed): requests, bs4
+import requests
+from bs4 import BeautifulSoup
+
 
 logger = logging.getLogger(__name__)
 
@@ -26,48 +35,293 @@ logger = logging.getLogger(__name__)
 # name and circular imports). Initialize lazily on first driver invocation using
 # the `cas_dir` value the framework passes in (derived from Config.archive_root).
 _DOWNLOAD_PLAN_INITIALIZED = False
-_DOWNLOAD_PLAN_DEFAULT_FOLDER = 'chemview_archive_ncn'
+# Keep same logical default as other drivers
+_DOWNLOAD_PLAN_DEFAULT_FOLDER = "chemview_archive_ncn"
 
+# -- HTTP / parsing helpers ---------------------------------------
 
-def fixup_back_zip_links(zip_link_list):
-    """Normalize a list of back-end ZIP URLs in-place and return the new list.
-    We've been seeing bad urls like:
-    https://chemview.epa.gov/chemview/admin/proxy?filename=20200213%2FP-20-0015%2FP-20-0015_5.zip&mediaType=zip&mediaType=zip
-    The double mediaType parameter appears to be harmless, but the 'admin' path segment
-    is wrong. The downloads for these urls always fail with 404. If we take "/admin" out of the path,
-    then the downloads succeed.
-
-    Keeps the original query string intact so percent-encoded parts remain.
+def build_session(user_agent: Optional[str] = None, timeout: int = 30) -> requests.Session:
     """
-    fixed = []
-    for u in zip_link_list:
+    Return a configured requests.Session with reasonable headers and a retry
+    adapter if desired. Caller may further configure.
+    """
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": user_agent or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    })
+    # TODO: add requests.adapters.Retry + HTTPAdapter if you want automatic retries
+    return s
+
+
+def get_html(session: requests.Session, url: str, timeout: int = 30) -> Optional[str]:
+    """
+    Fetch url and return the response text (HTML) or None on permanent failure.
+    Small wrapper for logging and basic retry behavior.
+    """
+    try:
+        r = session.get(url, timeout=timeout)
+        r.raise_for_status()
+        return r.text
+    except Exception:
+        logger.exception("get_html: failed to GET %s", url)
+        return None
+
+
+def get_json(session: requests.Session, url: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
+    """
+    GET JSON endpoint and return parsed JSON or None on error.
+    """
+    try:
+        r = session.get(url, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        logger.exception("get_json: failed to GET/parse JSON from %s", url)
+        return None
+
+
+def _extract_chemical_database_ids(json_obj: Dict[str, Any], source_id: Optional[str] = None) -> List[str]:
+    ncn_chemical_database_ids: List[str] = []
+    # The top-level data is in 'chemicalDataTables', then 'chemicalQueryResults' is a list.
+    # Assuming the data we want is in the first (and only) item of that list:
+    query_results = json_obj['chemicalDataTables']['chemicalQueryResults'][0]
+
+    # Now, we get the list of 'sources'
+    sources_list = query_results['sources']
+    for source in sources_list:
+        if source.get('sourceName') == 'New Chemical Notice':
+            # This is the list we want to iterate through to get our values
+            chemicals_list = source.get('chemicals', [])
+            for chemical in chemicals_list:
+                chem_id = chemical.get('id')
+                if chem_id:
+                    ncn_chemical_database_ids.append(str(chem_id))
+            # No need to check other sources once we've found the NCN source
+            break
+    logger.debug("ncn_chemical_database_ids: %s", ncn_chemical_database_ids)
+    return ncn_chemical_database_ids
+
+
+# -- CSV -> modal resolution (pluggable) ---------------------------------
+
+def synthesize_modal_urls_from_export_url(export_url: str, session: requests.Session) -> List[str]:
+    """
+    Synthesize one or more NCN modal URLs from a CSV input row by:
+      - parsing the provided row's url value to extract modalId and sourceId
+      - calling the datatable JSON endpoint to find chemicalDatabaseId(s)
+      - composing modal URLs for each chemicalDatabaseId found
+
+    Returns list of fully-qualified modal URL strings (may be empty).
+    """
+    logger.debug("In synthesize_modal_urls_from_export_row for export url: %s", export_url)
+    modal_url_list: List[str] = []
+
+    source_id = "37574985"  # New Chemical Notice sourceId is known/fixed
+    try:
+        parsed = urlparse(export_url)
+        qs = parse_qs(parsed.query)
+        modal_ids = qs.get('modalId')
+        modal_id = modal_ids[0] if modal_ids and len(modal_ids) > 0 else None
+        if modal_id:
+            datatable_url = build_big_ugly_datatable_query_url(modal_id, source_id)
+            json_resp = get_json(session, datatable_url)
+            if json_resp:
+                chemical_db_id_list = _extract_chemical_database_ids(json_resp, source_id=source_id)
+                if chemical_db_id_list and len(chemical_db_id_list) > 0:
+                    # Compose modal URLs
+                    for chem_db_id in chemical_db_id_list:
+                        modal_url = f"https://chemview.epa.gov/chemview/chemicaldata.do?sourceId={source_id or ''}&chemicalDataId={chem_db_id}&chemicalId={modal_id}"
+                        modal_url_list.append(modal_url)
+                    logger.debug("Synthesized %d modal urls", len(modal_url_list))
+                else:
+                    logger.warning("No chemicalDatabaseIds found for modalId=%s", modal_id)
+            else:
+                logger.warning("No JSON response from datatable URL: %s", datatable_url)
+        else:
+            logger.warning("No modalId found in export URL: %s", export_url)
+    except Exception:
+        logger.exception("unexpected error for export url: %s", export_url)
+
+    return modal_url_list
+
+
+def build_big_ugly_datatable_query_url(modal_id: str, source_id: str) -> str:
+    # Build a datatable query URL. We don't know how tolerant the
+    # endpoint is to missing params, so we provide all know values.
+    # Replace the compact params block in `drive_ncn_download.py` with this ordered parameter list
+    base = 'https://chemview.epa.gov/chemview/chemicals/datatable'
+    params = [
+        ('isTemplateFilter', 'false'),
+        ('chemicalIds', modal_id),
+        ('synonymIds', ''),
+        ('sourceIds', source_id or ''),
+        ('draw', '6'),
+        ('columns[0][data]', '0'),
+        ('columns[0][name]', ''),
+        ('columns[0][searchable]', 'true'),
+        ('columns[0][orderable]', 'false'),
+        ('columns[0][search][value]', ''),
+        ('columns[0][search][regex]', 'false'),
+        ('columns[1][data]', '1'),
+        ('columns[1][name]', ''),
+        ('columns[1][searchable]', 'true'),
+        ('columns[1][orderable]', 'true'),
+        ('columns[1][search][value]', ''),
+        ('columns[1][search][regex]', 'false'),
+        ('columns[2][data]', '2'),
+        ('columns[2][name]', ''),
+        ('columns[2][searchable]', 'true'),
+        ('columns[2][orderable]', 'false'),
+        ('columns[2][search][value]', ''),
+        ('columns[2][search][regex]', 'false'),
+        ('columns[3][data]', '3'),
+        ('columns[3][name]', ''),
+        ('columns[3][searchable]', 'true'),
+        ('columns[3][orderable]', 'false'),
+        ('columns[3][search][value]', ''),
+        ('columns[3][search][regex]', 'false'),
+        ('columns[4][data]', '4'),
+        ('columns[4][name]', ''),
+        ('columns[4][searchable]', 'true'),
+        ('columns[4][orderable]', 'false'),
+        ('columns[4][search][value]', ''),
+        ('columns[4][search][regex]', 'false'),
+        ('columns[5][data]', '5'),
+        ('columns[5][name]', ''),
+        ('columns[5][searchable]', 'true'),
+        ('columns[5][orderable]', 'false'),
+        ('columns[5][search][value]', ''),
+        ('columns[5][search][regex]', 'false'),
+        ('order[0][column]', '1'),
+        ('order[0][dir]', 'asc'),
+        ('order[0][name]', ''),
+        ('start', '0'),
+        ('length', '10'),
+        ('search[value]', ''),
+        ('search[regex]', 'false'),
+        ('_', str(int(time.time() * 1000))),
+    ]
+    datatable_url = base + '?' + urlencode(params, doseq=True)
+    logger.debug("Built datatable URL: %s", datatable_url[:121])
+    return datatable_url
+
+
+# -- modal parsing (BeautifulSoup) ---------------------------------------
+def parse_modal_html_for_notice_and_links(html: str) -> Dict[str, Any]:
+    """
+    Parse modal HTML (string) and extract:
+      - notice_id: canonical identifier for the modal (string)
+      - notice_safe_name: sanitized filename-friendly name
+      - modal_html: the raw html to save
+      - zip_links: list of download URLs (strings)
+      - chem_name: optional chemical name
+      - chem_db_id: optional internal db id
+
+    Simplified: assume all hrefs in the modal are full, absolute URLs.
+    Collect anchors whose visible text contains 'Download zip' (case-insensitive)
+    or whose href contains 'mediaType=zip' or ends with '.zip'.
+    """
+    logger.debug("In parse_modal_html_for_notice_and_links (simplified)")
+    soup = BeautifulSoup(html, "html.parser")
+    result = {
+        "notice_id": None,
+        "notice_safe_name": None,
+        "modal_html": html,
+        "zip_links": [],
+        "chem_name": None,
+        "chem_db_id": None,
+    }
+
+    # 1) try to find an identifying element
+    ident = soup.select_one("span#Notice_Number")
+    if ident and ident.text:
+        result["notice_id"] = ident.text.strip()
+        result["notice_safe_name"] = "".join(c if c.isalnum() or c in "-_" else "_" for c in result["notice_id"])
+
+    # 2) find anchors that look like zip downloads; assume hrefs are absolute
+    zip_links: List[str] = []
+    for a in soup.find_all('a'):
         try:
-            parsed = urlparse(u.strip())
-            path = parsed.path or ''
-            # Remove any path segments equal to 'admin' (case-insensitive)
-            parts = [p for p in path.split('/') if p and p.lower() != 'admin']
-            new_path = ('/' if path.startswith('/') else '') + '/'.join(parts)
-            # Collapse repeated slashes
-            new_path = re.sub(r'/+', '/', new_path)
-            rebuilt = urlunparse((parsed.scheme, parsed.netloc, new_path, parsed.params, parsed.query, parsed.fragment))
-            if rebuilt != u:
-                logger.debug("fixup_back_zip_links: fixed %s -> %s", u, rebuilt)
-            fixed.append(rebuilt)
+            text = (a.get_text() or '').strip().lower()
+            href = (a.get('href') or '').strip()
+            href_l = href.lower()
+            if 'download zip' in text or 'mediastype=zip' in href_l or href_l.endswith('.zip'):
+                if href and href not in zip_links:
+                    zip_links.append(href)
         except Exception:
-            logger.exception("fixup_back_zip_links: error processing %s", u)
-            fixed.append(u)
-    return fixed
+            # Skip any malformed anchors
+            continue
+    logger.debug("found %d zip links", len(zip_links))
+    result['zip_links'] = zip_links
+
+    # 3) try to extract chemical name if present (best-effort)
+    try:
+        # Find the <strong> element whose text starts with 'Chemical Name'
+        strong = soup.find('strong', text=lambda s: s and s.strip().lower().startswith('chemical name'))
+        #logger.debug(f"Found strong for chemical name: {strong}")
+        if strong:
+            li = strong.find_parent('li')
+            #logger.debug(f"Found parent <li> for chemical name: {li}")
+            if li:
+                # Find the first <span> inside the <li>
+                span = li.find('span')
+                #logger.debug(f"Found first <span> in <li>: {span}")
+                if span:
+                    # Find the innermost <span> with the actual name
+                    inner_span = span.find('span')
+                    #logger.debug(f"Found inner <span> for chemical name: {inner_span}")
+                    if inner_span and inner_span.text:
+                        chem_text = inner_span.text.strip()
+                        logger.debug(f"Extracted chemical name text: {chem_text}")
+                        result['chem_name'] = chem_text
+                    else:
+                        # Fallback: use outer span text
+                        chem_text = span.text.strip()
+                        logger.debug(f"Fallback chemical name text: {chem_text}")
+                        result['chem_name'] = chem_text
+                else:
+                    logger.debug("No <span> found inside <li> for chemical name")
+            else:
+                logger.debug("No parent <li> found for chemical name <strong>")
+        else:
+            logger.debug("No <strong> found for chemical name")
+    except Exception as e:
+        logger.debug(f'Failed to extract chemical name from modal HTML: {e}')
+
+    logger.debug("parse modal result: %s", result)
+    return result
 
 
+# -- download-plan wrapper helper ----------------------------------------
+
+def add_plan_links_for_notice(cas_dir: Path, subfolder_path: Union[Path, str], links: List[str]) -> None:
+    """
+    Thin wrapper that calls download_plan.add_links_to_plan with a path structure.
+    Keep the call-site simple; the actual download_plan API expects:
+      download_plan.add_links_to_plan(accum, cas_dir_str, subfolder, list_of_urls)
+    We intentionally do not import download_plan here so that tests can stub the function. When
+    this is implemented in full, use the same API as existing drivers.
+    """
+    import download_plan  # local import to avoid heavy coupling at top-level
+    # Ensure subfolder_path is a Path
+    subfolder = Path(subfolder_path)
+    # Pass cas_dir as the CAS folder root and the relative subfolder as the subfolder_name
+    download_plan.add_links_to_plan(download_plan.DOWNLOAD_PLAN_ACCUM, cas_dir, subfolder, links)
+
+
+# -- main driver entrypoint (drop-in signature) ---------------------------
 def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, file_types: Any = None, retry_interval_hours: float = 12.0, archive_root=None) -> Dict[str, Any]:
-    """ Walk the browser through the web pages and modals we need to capture
-    and from which we will download supporting files.
+    """
+    Driver entrypoint: same signature shape as the Playwright-based driver so it can be
+    substituted without changes to harvest_framework.py.
     """
     result: Dict[str, Any] = {
-        'CAS:': cas_val,
-        'attempted': False,
-        'html': {'success': None, 'local_file_path': None, 'error': None, 'navigate_via': ''},
-        'pdf': {'success': None, 'local_file_path': None, 'error': None, 'navigate_via': ''}
+        "CAS:": cas_val,
+        "attempted": False,
+        "html": {"success": None, "local_file_path": None, "error": None, "navigate_via": ""},
+        "pdf": {"success": None, "local_file_path": None, "error": None, "navigate_via": ""},
     }
 
     if db is None or file_types is None:
@@ -91,18 +345,8 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
     if not need_html and not need_pdf:
         logger.info("No downloads needed for cas=%s (new chemical notice)", cas_val)
         return result
-
-    # Ensure debug_out path exists and set a fallback default for CAS foldername
-    if debug_out is None:
-        debug_out = Path("debug_artifacts")
-    debug_out = Path(debug_out)
-    debug_out.mkdir(parents=True, exist_ok=True)
-    if cas_dir is None:
-        logger.error("cas_dir is required")
-        return result
-
-    # Lazy-initialize the download_plan using the configured 
-	# archive root folder.
+    # Lazy-initialize the download_plan using the configured
+    # archive root folder.
     global _DOWNLOAD_PLAN_INITIALIZED
     if not _DOWNLOAD_PLAN_INITIALIZED:
         try:
@@ -115,17 +359,15 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
 
     logger.info("Start of processing for URL: %s", url)
 
-    if page is None:
-        logger.error("No page passed down from framework")
-        return result
-
     # We've passed all the pre-checks; mark that we are attempting processing
-    result['attempted'] = True
+
+
+    result["attempted"] = True
     # Be pessimistic. Assume failure until success is confirmed.
     if need_html:
-        result['html']['success'] = False
+        result["html"]["success"] = False
     if need_pdf:
-        result['pdf']['success'] = False
+        result["pdf"]["success"] = False
     # from this point on down, we only need to set the msg value for failures
     # but will need to set 'success' to True on completed, confirmed successes.
 
@@ -136,32 +378,58 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
     # parameter, so we now repair the URL if needed and always return it.
     result, url = validate_url_and_get_chem_info_ids(url, cas_val, result)
 
-    nav_ok = navigate_to_chemical_overview_modal(page, url, db)
-    if nav_ok:
-        ncn_list = find_anchor_links_on_chemical_overview_modal(page)
-         # Process ncn links which should each have a modal and some zips to harvest
-        if ncn_list and len(ncn_list) > 0:
-             for idx, ncn_link in enumerate(ncn_list, start=1):
-                 # Scrape the modal and get the zip download links
-                 scrape_success = scrape_modal_and_get_downloads(page, cas_dir, ncn_link, idx, need_html, need_pdf, result)
-                 if need_pdf and scrape_success:
-                     # declare success here for "pdf" / zip downloads
-                     result['pdf']['success'] = True
-                     result['pdf']['local_file_path'] = str(cas_dir / "supporting_docs")
-                     result['pdf']['navigate_via'] = url
-                 # else: if we didn't find a list we are going to log this as a failure below
-        else:
-            msg = "No NCN links found on initial page"
-            logger.error(msg)
-            result['html']['error'] = msg
-            result['pdf']['error'] = msg
+    # Prepare to make HTTPS requests
+    session = build_session()
+    # Attempt to synthesize modal URLs from the input row.
+    modal_urls = synthesize_modal_urls_from_export_url(url, session)
 
-    # Record chemical info if we have enough data
-    record_chemical_info(result, db)
+    if modal_urls:
+        # For each resolved modal URL: fetch HTML, parse for links, save HTML, and add links to plan
+        for modal_url in modal_urls:
+            html = get_html(session, modal_url)
+            if not html:
+                logger.warning("Failed to fetch modal HTML from %s", modal_url)
+                continue
 
-    # If we attempted processing then record failures for any file
-    # types that were explicitly set to False by the processing code.
-    # Success will have been logged at the point of processing.
+            parsed = parse_modal_html_for_notice_and_links(html)
+            result["chem_info"]['chem_name'] = parsed.get('chem_name')
+            notice_id = parsed.get("notice_id") or "unknown"
+            notice_safe = parsed.get("notice_safe_name") or notice_id or "item"
+            # ensure cas_dir exists
+            cas_dir = Path(cas_dir)
+            cas_dir.mkdir(parents=True, exist_ok=True)
+            # save modal HTML
+            notice_dir = cas_dir / notice_safe
+            notice_dir.mkdir(parents=True, exist_ok=True)
+            html_path = notice_dir / f"ncn_{notice_safe}.html"
+
+            try:
+                html_path.write_text(parsed.get("modal_html", html), encoding="utf-8")
+                logger.info("Saved modal HTML to %s", html_path)
+                result["html"]["success"] = True
+                result["html"]["local_file_path"] = str(html_path)
+                result["html"]["navigate_via"] = modal_url
+            except Exception:
+                logger.exception("Failed to save modal HTML to %s", html_path)
+
+            # add zip links to plan if present
+            zip_links = parsed.get("zip_links", []) or []
+            if zip_links:
+                # Example subfolder path: "newChemicalNotices/<notice_safe>/supporting_docs"
+                subfolder = cas_dir/ notice_safe / "supporting_docs"
+                add_plan_links_for_notice("", subfolder, zip_links)
+                result["pdf"]["success"] = True
+                result["pdf"]["local_file_path"] = str(cas_dir / subfolder)
+                result["pdf"]["navigate_via"] = modal_url
+
+        # Record chemical info if we have enough data
+        record_chemical_info(result, db)
+    else:
+        msg = "No modal URLs resolved for given input row"
+        logger.warning(msg)
+        result["html"]["error"] = msg
+        result["pdf"]["error"] = msg
+
     # Note that "pdf" here is an umbrella term for all non-html downloads,
     # which could be pdfs, zips, or xmls.
     if result.get('attempted'):
@@ -194,138 +462,25 @@ def drive_new_chemical_notice_download(url, cas_val, cas_dir: Path, debug_out=No
                         logger.exception("Failed to write failure to DB for pdf post-loop")
     else:
         logger.debug("No downloads attempted.")
-
+        return result
     return result
 
 
-def scrape_modal_and_get_downloads(page, cas_dir, ncn_link, idx, need_html: bool, need_pdf: bool, result) -> Optional[Any]:
-    """
-    Clicks the given NCN anchor and waits robustly for the unique visible modal
-    to appear and contain the expected content. Returns a Locator for the modal container
-    or None on failure.
-    """
-    if ncn_link is None:
-        logger.warning("No NCN link passed to click_anchor_link_and_wait_for_modal")
-        return None
-
-    # --- 1. Click the anchor to bring up the specfic report modal ---
-    try:
-        # Use Playwright auto-waiting click on the Locator
-        ncn_link.click(timeout=30000)
-        logger.debug("Clicked NCN link via locator.click()")
-    except TimeoutError:
-        logger.warning("Failed to click NCN anchor within 30s timeout.")
-        return None
-    except Exception as e:
-        logger.warning("Failed to click NCN anchor: %s", e)
-        return None
-
-    # --- 2. Wait for the content we care about (the modal and the first zip download anchor) to become visible ---
-    # python
-    # Replace the existing \"Wait for the content we care about\" block in `click_ncn_anchor_link_and_wait_for_modal`
-    zip_locator = None
-    try:
-        # Prefer a visible modal container (Bootstrap commonly adds 'show' or older 'in')
-        visible_modal_locator = page.locator(
-            'div.modal.show div.modal-body.action, div.modal.in div.modal-body.action').first
-        # Wait briefly for it to become visible (raises on timeout)
-        visible_modal_locator.wait_for(state="visible", timeout=5000)
-        logger.debug("found visible modal-body.action via preferred selector")
-        # Limit anchors to those with the exact visible text we care about to avoid hidden duplicates
-        zip_locator = visible_modal_locator.locator('li a', has_text=" (Download zip)")
-        logger.debug("Zip locator count: %d", zip_locator.count())
-        zip_locator.first.wait_for(state="visible", timeout=20000)
-    except TimeoutError:
-        logger.warning("Timed out waiting for zip anchor to appear after clicking anchor.")
-        return None
-    except Exception as e:
-        logger.warning("Error waiting for zip anchor to appear after clicking anchor: %s", e)
-        return None
-
-    notice_number = None
-    raw_notice = None
-    try:
-        notice_span = visible_modal_locator.locator('span#Notice_Number').first
-        if notice_span.count() > 0:
-            raw_notice = notice_span.inner_text().strip()
-            logger.debug(f"Using raw notice number: {raw_notice}")
-        else:
-            logger.warning("Notice number span not found in modal")
-            # will attempt to get number from anchor tag instead
-            anchor = visible_modal_locator.locator(
-                "div.snur_meta:has(span#NCN_Number_label) a.show_external_link").first
-            if anchor.count() > 0:
-                raw_notice = anchor.inner_text().strip()
-                logger.debug(f"Using raw anchor ncn number: {raw_notice}")
+def record_chemical_info(result, db):
+    # Save chem info to DB if we have the three bits of info we need
+    chem_info = result.get('chem_info', {})
+    logger.debug("in record_chemical_info with chem_info: %s", chem_info)
+    if chem_info and chem_info['chem_id'] and chem_info['chem_db_id'] and chem_info['chem_name']:
+        try:
+            ok = db.save_chemical_info(chem_info['chem_id'], chem_info['chem_db_id'], chem_info['chem_name'])
+            if ok:
+                logger.debug("Saved chemical info: %s", chem_info)
             else:
-                logger.warning("ncn number anchor not found in modal, will fall back to item number")
-    except Exception as e:
-        logger.warning(f"Error extracting notice number: {e}")
-    if raw_notice is not None:
-        # Sanitize for filename: keep alphanum, dash, underscore
-        notice_number = re.sub(r'[^A-Za-z0-9\-_]', '_', raw_notice)
-        logger.debug(f"Extracted and sanitized notice number: {notice_number}")
+                logger.error("HarvestDB.save_chemical_info indicated mismatch or failure for %s", chem_info)
+        except Exception:
+            logger.exception("Exception calling HarvestDB.save_chemical_info for %s", chem_info)
     else:
-        notice_number = f"item_{idx}"
-        logger.debug(f"Falling back to default using item number for notice number: {notice_number}")
-
-    # Extract the html from visible_modal_locator and save it to a file named
-    # ncn_<notice_number>.html in notice folder.
-    notice_dir = None
-    try:
-        modal_html = visible_modal_locator.evaluate("el => el.outerHTML")
-        # create a folder for this notice number inside cas_dir
-        notice_dir = cas_dir / notice_number
-        notice_dir.mkdir(parents=True, exist_ok=True)
-        html_path = notice_dir / f"ncn_{notice_number}.html"
-        with open(html_path, 'w', encoding='utf-8') as fh:
-            fh.write(modal_html)
-        logger.info(f"Saved modal HTML to {html_path}")
-        result['html']['success'] = True
-        result['html']['local_file_path'] = str(html_path)
-        result['html']['navigate_via'] = page.url
-        # Make best-effort attempt to capture chemical's name
-        nameSpan = visible_modal_locator.locator("li:has-text('Chemical Name') span span").first
-        chem_name = ""
-        if nameSpan.count() > 0:
-            chem_name = nameSpan.evaluate("el => el.innerText") or ""
-        chem_name = re.sub(r'\s+', ' ', chem_name).strip()
-        if chem_name:
-            logger.debug("Extracted chemical name from modal: %s", chem_name)
-            result['chem_info']['chem_name'] = chem_name
-        else:
-            logger.warning("Chemical name element not found in modal")
-    except Exception as e:
-        logger.warning(f"Error saving modal HTML: {e}")
-
-    # --- 3. Extract zip download links and add to download plan ---
-    if need_pdf and zip_locator is not None:
-        logger.debug("Finding ZIP download links in the modal")
-        zip_link_list = zip_locator.evaluate_all("anchors => anchors.map(a => a.href)")
-        # Fix up any backend/admin proxy URL oddities (remove 'admin' path segments, etc.)
-        zip_link_list = fixup_back_zip_links(zip_link_list)
-        logger.info("Found %d ZIP download links", len(zip_link_list))
-        if (len(zip_link_list) > 0):
-            # Store the zip files in a subfolder of the notice folder
-            ncn_subfolder = cas_dir / notice_number / 'supporting_docs'
-            download_plan.add_links_to_plan(download_plan.DOWNLOAD_PLAN_ACCUM, "", ncn_subfolder, zip_link_list)
-        else:
-            logger.warning("No supporting doc links found")
-
-    # Close the modal using a robust locator and auto-wait
-    # Close button resides in a sibling div to modal-body, so navigate up to modal-content first
-    outer_content_locator = visible_modal_locator.locator(
-        'xpath=ancestor::div[contains(@class, "modal-content")]').first
-    close_btn = outer_content_locator.locator("a.close[data-dismiss='modal']").first
-    if close_btn is not None:
-        logger.debug("Will try to close modal")
-        close_btn.click()
-        visible_modal_locator.wait_for(state="hidden", timeout=5000)
-        logger.debug("Closed modal successfully")
-    else:
-        logger.warning("Close button not found in modal; skipping close")
-
-    return True
+        logger.error("Insufficient data to record chemical info: %s", chem_info)
 
 def validate_url_and_get_chem_info_ids(url, cas_val, result):
     """Extract two values from the url, if we can:
@@ -383,103 +538,3 @@ def validate_url_and_get_chem_info_ids(url, cas_val, result):
     result['chem_info']['chem_db_id'] = chem_db_id
 
     return result, url
-
-
-def find_anchor_links_on_chemical_overview_modal(page):
-    ncn_link_list = []
-    # 1. Define the Locator for the specific anchors you want.
-    # Playwright is smart enough to search only within the visible
-    # modal if it's the only element matching this selector.
-    anchors_locator = page.locator('div#chemical-detail-modal-body a[href]')
-    anchors = []
-    try:
-        # 2. Explicitly wait for the *first* matching anchor to be visible.
-        anchors_locator.first.wait_for(state="visible", timeout=8000)
-        # 3. Once at least one is visible, retrieve all matching Locators.
-        # Note: .all() returns a list of Locators, ready for iteration.
-        anchors = anchors_locator.all()
-    except TimeoutError:
-        # Handle the case where the element never appears within the timeout
-        logger.warning("Timeout: No href anchors appeared before timeout.")
-    except Exception as e:
-        logger.error(f"An unexpected error occurred while waiting for anchors: {e}")
-
-    # Continue with your logic using the 'anchors' list
-    logger.debug("Found %d href anchors on page", len(anchors))
-    for i, anchor in enumerate(anchors):
-        try:
-            text = anchor.inner_text().strip()
-            if text is not None:
-                logger.debug("examining anchor text: %s", text)
-                # Identify SR/8e links by text prefix
-                if text.startswith("New Chemical Notice"):
-                    logger.debug("Found ncn link")
-                    ncn_link_list.append(anchor)
-                elif text != "":
-                    logger.warning("Found unexpected non-blank link")
-                else:
-                    logger.debug("Found blank anchor text; skipping")
-            else:
-                logger.debug("Anchor text is None; skipping")
-        except Exception:
-            logger.exception("Exception while processing anchor %d", i)
-            continue
-
-    logger.info(f"Found {len(ncn_link_list)} links to NCN modals on page")
-
-    return ncn_link_list
-
-
-def navigate_to_chemical_overview_modal(page, url: str, db) -> bool:
-    """
-    Navigates to the URL and waits for the chemical overview modal content to be visible.
-
-    Uses the Locator API for robust waiting on the modal element.
-    """
-    selector = "div#chemical-detail-modal-body"
-    timeout_ms = 30000
-    # 1. Navigate to the page with a single, generous timeout (90s default)
-    nav_ok = False
-    try:
-        # Use page.goto and rely on Playwright's default internal retry mechanisms if needed
-        # We target 'domcontentloaded' as it's the fastest signal that the basic page structure is ready.
-        page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-        logger.info(f"Navigation to URL successful: {url}")
-    except TimeoutError as e:
-        logger.error(f"Initial navigation to URL timed out ({timeout_ms}ms): {e}")
-        # nav_ok remains False
-    except Exception as e:
-        logger.error(f"Initial navigation failed unexpectedly: {e}")
-        # nav_ok remains False
-    else:
-        # 2. Use the Locator API to wait for the required modal content.
-        # The locator will retry finding and checking the visibility of the element
-        # until the timeout (default 30s, or you can pass a custom timeout here).
-        try:
-            modal_locator = page.locator(selector)
-            modal_locator.wait_for(state="visible", timeout=15000)  # Use 15s wait for the modal
-            logger.info("Modal content is present and visible.")
-            nav_ok = True
-        except TimeoutError as e:
-            logger.error(f"Modal content selector '{selector}' not found or visible within timeout (15s).")
-            # nav_ok remains False
-        except Exception as e:
-            logger.error(f"Error while waiting for modal visibility: {e}")
-            # nav_ok remains False
-    return nav_ok
-
-def record_chemical_info(result, db):
-    # Save chem info to DB if we have the three bits of info we need
-    chem_info = result.get('chem_info', {})
-    logger.debug("in record_chemical_info with chem_info: %s", chem_info)
-    if chem_info and chem_info['chem_id'] and chem_info['chem_db_id'] and chem_info['chem_name']:
-        try:
-            ok = db.save_chemical_info(chem_info['chem_id'], chem_info['chem_db_id'], chem_info['chem_name'])
-            if ok:
-                logger.debug("Saved chemical info: %s", chem_info)
-            else:
-                logger.error("HarvestDB.save_chemical_info indicated mismatch or failure for %s", chem_info)
-        except Exception:
-            logger.exception("Exception calling HarvestDB.save_chemical_info for %s", chem_info)
-    else:
-        logger.error("Insufficient data to record chemical info: %s", chem_info)
