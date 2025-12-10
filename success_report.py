@@ -26,9 +26,11 @@ def success_report(db_path: str, output_file: str):
             report.write("File Type Report\n")
             report.write("================\n")
             for file_type, success_count, failure_count in results:
-                report.write(f"File Type: {file_type}\n")
+                success_pct = round(success_count/(success_count+failure_count), 2) * 100
+                report.write(f"  File Type: {file_type}\n")
                 report.write(f"  Successes: {success_count}\n")
-                report.write(f"  Failures: {failure_count}\n")
+                report.write(f"   Failures: {failure_count}\n")
+                report.write(f"Success Pct: {success_pct}\n")
                 report.write("\n")
 
         print(f"Report generated successfully: {output_file}")
