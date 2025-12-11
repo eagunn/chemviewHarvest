@@ -14,9 +14,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    input_file: str = "input_files/chemviewSubstRisksExport20251029.csv"
-    #input_file: str = "input_files/srExportTest1.csv"
-    archive_root: str = "chemview_archive_8e"
+    #input_file: str = "input_files/chemviewSubstRisksExport20251029.csv"
+    input_file: str = "input_files/srExportTest1.csv"
+    archive_root: str = "H:/openSource/dataPreservation/chemView/harvest/chemview_archive_substantial_risk"
     db_path: str = "chemview_harvest.db"
     headless: bool = False  # headless false means the browser will be displayed
     debug_out: str = "debug_artifacts"
@@ -24,6 +24,7 @@ class Config:
     start_row: int = None  # if set, skip rows up to this row number
     stop_file: str = "harvest.stop"  # optional stop-file; when present the harvest stops gracefully
     retry_interval_hours: float = 12.0  # hours to wait after a failure before retrying
+    data_type: str = "substantialRiskReports"  # which data/report type this run targets
 
 # Initialize CONFIG with concrete type so static analyzers see its attributes
 CONFIG: Config = Config()
@@ -31,15 +32,7 @@ CONFIG: Config = Config()
 
 def initialize_config(argv):
     """
-    Build the Config object from command-line args.
-
-    This keeps the same CLI and defaults as before. The function was kept in
-    this thin wrapper so comments and CLI help remain colocated with this
-    script. The heavy lifting (loop, DB, browser reuse) is delegated to the
-    shared `harvest_framework` module.
-
-    New option:
-    --retry-interval-hours: float number of hours to wait after a recorded failure before retrying (default 12.0)
+    Build the Config object from defaults and any runtime arguments given
     """
     parser = argparse.ArgumentParser(description="Substantial Risk harvest script")
     parser.add_argument("--headless", action="store_true", help="Run headless (placeholder)")
@@ -52,6 +45,7 @@ def initialize_config(argv):
     parser.add_argument("--start-row", type=int, help="Start processing from this row number (1-based index)")
     parser.add_argument("--stop-file", dest='stop_file', type=str, help="Path to stop file (when present, harvest stops)")
     parser.add_argument("--retry-interval-hours", dest='retry_interval_hours', type=float, help="Hours to wait after a failure before retrying (default 12.0)")
+    parser.add_argument("--data-type", dest='data_type', type=str, help="Data/report type name (default: premanufactureNotices)")
     args = parser.parse_args(argv)
 
     global CONFIG
@@ -65,6 +59,7 @@ def initialize_config(argv):
         start_row=args.start_row if args.start_row is not None else None,
         stop_file=args.stop_file if args.stop_file is not None else Config.stop_file,
         retry_interval_hours=args.retry_interval_hours if args.retry_interval_hours is not None else Config.retry_interval_hours,
+        data_type=args.data_type if args.data_type is not None else Config.data_type,
     )
     logging.info(f"Configuration initialized: {CONFIG}")
 
@@ -72,10 +67,8 @@ def initialize_config(argv):
 def main(argv=None):
     """Entry point for the Substantial Risk harvest wrapper.
 
-    This file is intentionally a thin wrapper that preserves the original
-    script's CLI and comments while delegating the primary work to the
-    framework module. That keeps your original documentation in place and
-    consolidates the shared behavior.
+    This file is an intentionally thin wrapper around the standard
+    harvest framework, invoking our own specialized download driver.
     """
     initialize_config(argv)
     # Configure centralized logging for the process

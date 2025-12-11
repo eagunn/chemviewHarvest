@@ -1,3 +1,14 @@
+"""drive_substantial_risk_download.py
+
+Driver to navigate EPA ChemView chemical overview modals and extract Substantial Risk (8e) reports
+and summary modals. Navigates to a chemical detail page using a Playwright `page`, locates Substantial
+Risk and summary anchors, scrapes modal HTML, discovers PDF links, queues PDF download tasks via
+`download_plan`, writes HTML files to `cas_dir`, and logs successes/failures to the provided `db`.
+
+Designed for lazy initialization of `download_plan` to avoid import-time folder hard-coding and
+circular imports. Expected to be invoked by the framework with `page`, `db`, `file_types`, and `cas_dir`.
+"""
+
 import requests
 import html as html_lib
 from pathlib import Path
@@ -6,138 +17,21 @@ import logging
 from typing import Dict, Any, Optional
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import json
-from datetime import datetime, timedelta
 import atexit
 import re
+import download_plan
 
 logger = logging.getLogger(__name__)
 
-# Module-level accumulator for download plans so we can write one JSON per N CAS entries
-PDF_PLAN_ACCUM: Dict[str, Any] = {'folder': 'chemview_archive_8e', 'subfolderList': [], 'downloadList': []}
-PDF_PLAN_ACCUM_CAS_SET: set = set()
-PDF_PLAN_ACCUM_CAS_SINCE_WRITE: int = 0
-PDF_PLAN_WRITE_BATCH_SIZE: int = 25
-PDF_PLAN_OUT_DIR: Path = Path('pdfDownloadsToDo')
-PDF_PLAN_OUT_DIR.mkdir(parents=True, exist_ok=True)
+# Do not initialize download_plan at import time (avoids hard-coding the folder
+# name and circular imports). Initialize lazily on first driver invocation using
+# the `cas_dir` value the framework passes in (derived from Config.archive_root).
+_DOWNLOAD_PLAN_INITIALIZED = False
+_DOWNLOAD_PLAN_DEFAULT_FOLDER = 'chemview_archive_substantial_risk'
 
-
-def _need_download_from_db(db, cas_val: str, file_type: str, retry_interval_hours: float = 12.0) -> bool:
-    """
-    Policy:
-    - If no record: return True
-    - If record and last_success_datetime is not null: return False (do not retry if any success)
-    - If record and last_success_datetime is null:
-        - If last_failure_datetime is null: return True
-        - If last_failure_datetime is less than `retry_interval_hours` ago: return False
-        - If last_failure_datetime is more than `retry_interval_hours` ago: return True
-
-    retry_interval_hours: number of hours to wait after a failure before retrying (default 12.0)
-    """
-    record = None
-    do_need_download = False
-    try:
-        record = db.get_harvest_status(cas_val, file_type)
-    except Exception:
-        logger.exception("DB read failed when checking need for %s / %s", cas_val, file_type)
-        # If we can't read the db, we don't want to be doing downloads.
-        # We'll return the false set above
-
-    if record:
-        last_success = record.get('last_success_datetime')
-        last_failure = record.get('last_failure_datetime')
-        # If any success is recorded, do not retry
-        if last_success:
-            logger.debug("Found prior success for %s / %s; no download needed", cas_val, file_type)
-        else:
-            # If no success, check failure interval
-            if last_failure:
-                now = datetime.now()
-                try:
-                    last_failure_dt = datetime.fromisoformat(str(last_failure))
-                except Exception:
-                    logger.exception("Failed to parse last_failure_datetime for %s / %s", cas_val, file_type)
-                    # conservative: do not retry if we can't parse the stored timestamp
-                    return False
-                if now - last_failure_dt > timedelta(hours=retry_interval_hours):
-                    do_need_download = True
-                    logger.debug("Found old-enough prior failure for %s / %s (threshold=%sh)", cas_val, file_type, retry_interval_hours)
-                else:
-                    logger.debug("Found too-new prior failure for %s / %s; no download needed (threshold=%sh)", cas_val, file_type, retry_interval_hours)
-            else:
-                # no success, no failure -> need download
-                do_need_download = True
-    else:
-        # no record -> need download
-        do_need_download = True
-    return do_need_download
-
-
-# --- helpers for building and saving a per-run JSON download plan ---
-
-def _ensure_cas_entry(plan: Dict[str, Any], cas_folder_name: str) -> Dict[str, Any]:
-    """Return or create a cas entry dict inside plan['subfolderList']."""
-    for entry in plan.get('subfolderList', []):
-        if entry.get('folder') == cas_folder_name:
-            return entry
-    new_entry = {'folder': cas_folder_name, 'subfolderList': [], 'downloadList': []}
-    plan.setdefault('subfolderList', []).append(new_entry)
-    return new_entry
-
-
-def _ensure_reports_subfolder(cas_entry: Dict[str, Any], reports_name: str = 'substantialRiskReports') -> Dict[str, Any]:
-    """Return or create the reports subfolder dict inside a cas_entry."""
-    for sf in cas_entry.get('subfolderList', []):
-        if sf.get('folder') == reports_name:
-            return sf
-    new_sf = {'folder': reports_name, 'subfolderList': [], 'downloadList': []}
-    cas_entry.setdefault('subfolderList', []).append(new_sf)
-    return new_sf
-
-
-def add_pdf_links_to_plan(plan: Dict[str, Any], cas_dir: Path, pdf_links: list[str]):
-    """Add pdf_links to the nested plan structure under the cas_dir name and substantialRiskReports subfolder.
-    Duplicate URLs are ignored.
-    """
-    if not pdf_links:
-        return
-    cas_folder_name = cas_dir.name
-    cas_entry = _ensure_cas_entry(plan, cas_folder_name)
-    reports_sf = _ensure_reports_subfolder(cas_entry)
-    existing = set(reports_sf.get('downloadList', []))
-    added = 0
-    skipped_duplicates = 0
-    for url in pdf_links:
-        if not url:
-            continue
-        if url in existing:
-            skipped_duplicates += 1
-            continue
-        reports_sf.setdefault('downloadList', []).append(url)
-        existing.add(url)
-        added += 1
-
-
-
-def save_download_plan(plan: Dict[str, Any], debug_out: Path) -> Path:
-    """Write the plan to a timestamped JSON file in debug_out and return the path."""
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"pdfDownloads_{ts}.json"
-    out_path = Path(debug_out) / filename
-    try:
-        with open(out_path, 'w', encoding='utf-8') as fh:
-            json.dump(plan, fh, indent=2)
-        logger.info("Saved PDF download plan to %s", out_path)
-    except Exception as e:
-        logger.exception("Failed to save pdf download plan to %s: %s", out_path, e)
-    return out_path
-
-
-def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, file_types: Any = None, retry_interval_hours: float = 12.0) -> Dict[str, Any]:
-    """Use DB to decide whether to attempt, then returns random outcomes and logs them to DB.
-
-    `retry_interval_hours` controls how long to wait after a recorded failure before retrying (default 12 hours).
-    Returns a dict result, see structure below
+def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None, headless=True, browser=None, page=None, db=None, file_types: Any = None, retry_interval_hours: float = 12.0, archive_root=None) -> Dict[str, Any]:
+    """ Walk the browser through the web pages and modals we need to capture
+    and from which we will download supporting files.
     """
     result: Dict[str, Any] = {
         'CAS:': cas_val,
@@ -160,8 +54,13 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
         result['pdf']['error'] = msg
         return result
 
-    need_html = _need_download_from_db(db, cas_val, file_types.substantial_risk_html, retry_interval_hours=retry_interval_hours)
-    need_pdf = _need_download_from_db(db, cas_val, file_types.substantial_risk_pdf, retry_interval_hours=retry_interval_hours)
+    # TODO: for 8HQ-<value> ids that end in a letter, shortcircuit here
+    # and skip processing. Cathy and I agree that all the 8HQ-<value>X
+    # entries have the same modal and download content as the plain
+    # 8HQ-<value> entry.
+
+    need_html = db.need_download(cas_val, file_types.substantial_risk_html, retry_interval_hours=retry_interval_hours)
+    need_pdf = db.need_download(cas_val, file_types.substantial_risk_pdf, retry_interval_hours=retry_interval_hours)
 
     if not need_html and not need_pdf:
         logger.info("No downloads needed for cas=%s (substantial risk)", cas_val)
@@ -173,13 +72,24 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
     debug_out = Path(debug_out)
     debug_out.mkdir(parents=True, exist_ok=True)
     if cas_dir is None:
-        cas_dir = Path(".")
-    # Note: do not create cas_dir here; caller (harvest_framework) is responsible for ensuring cas_dir exists
+        logger.error("cas_dir is required")
+        return result
+
+    # Lazy-initialize the download_plan using the configured 
+    # archive root folder.
+    global _DOWNLOAD_PLAN_INITIALIZED
+    if not _DOWNLOAD_PLAN_INITIALIZED:
+        try:
+            folder_name = archive_root
+        except Exception:
+            folder_name = _DOWNLOAD_PLAN_DEFAULT_FOLDER
+        download_plan.init(folder=folder_name, out_dir=Path('downloadsToDo'), batch_size=25)
+        atexit.register(download_plan.flush)
+        _DOWNLOAD_PLAN_INITIALIZED = True
 
     logger.info("Start of processing for URL: %s", url)
-
     if page is None:
-        logger.error("No page provided for URL: %s", url)
+        logger.error("No page passed down from framework")
         return result
 
     # We've passed all the pre-checks; mark that we are attempting processing
@@ -193,44 +103,51 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
     # but will need to set 'success' to True on completed, confirmed successes.
 
     nav_ok = navigate_to_chemical_overview_modal(page, url)
-
+    #input("you should see a chemical overview page. then hit enter.")
     # Use positive-test style: only proceed when nav_ok is True; otherwise record an error
     if nav_ok:
         sr_link_list, summary_link_list = find_anchor_links_on_chemical_overview_modal(page)
-         # Process Substantial Risk / 8e links which should each have PDFs to harvest
+        #input("check log for number of links harvested, then hit enter")
+        # Process Substantial Risk / 8e links which should each have PDFs to harvest
         if sr_link_list and len(sr_link_list) > 0:
-             for idx, sr_link in enumerate(sr_link_list, start=1):
-                 # Click the SR anchor and get back a locator for the modal that opened (or None on failure)
-                 modal_locator = click_sr_anchor_link_and_wait_for_modal(page, sr_link)
-                 if modal_locator is None:
-                     logger.warning("Skipping SR link %d for cas %s because modal was not observed", idx, cas_val)
-                     continue
+            # ensure a default reports folder is available in case the scraper does not create a per-modal folder
+            subst_risk_dir = cas_dir / "substantialRiskReports"
+            for idx, sr_link in enumerate(sr_link_list, start=1):
+                # Click the SR anchor and get back a locator for the modal that opened (or None on failure)
+                modal_locator = click_sr_anchor_link_and_wait_for_modal(page, sr_link)
+                if modal_locator is None:
+                    logger.warning("Skipping SR link %d for cas %s because modal was not observed", idx, cas_val)
+                    continue
 
-                 pdf_link_list = None
-                 if need_html or need_pdf:
-                     # pass the modal locator (required) so the scraper uses the already-observed modal
-                     try:
-                         pdf_link_list = scrape_sr_modal_html_and_gather_pdf_links(page, modal_locator, need_html, need_pdf, cas_dir, cas_val, db, file_types, url, result, item_no=idx)
-                     except Exception as e:
-                         logger.exception("Exception raised while scraping modal %d: %s", idx, e)
-                         # record processing failures
-                         result['pdf']['error'] = f"Exception while scraping modal {idx}: {e}"
+                pdf_link_list = []
+                try:
+                    if need_html or need_pdf:
+                        # pass the modal locator (required) so the scraper uses the already-observed modal
+                        pdf_link_list, subst_risk_dir = scrape_sr_modal_html_and_gather_pdf_links(
+                            page, modal_locator, need_html, need_pdf, cas_dir, cas_val, db, file_types, url, result, item_no=idx
+                        )
+                except Exception as e:
+                    logger.exception("Exception raised while scraping modal %d: %s", idx, e)
+                    # record processing failures
+                    result['pdf']['error'] = f"Exception while scraping modal {idx}: {e}"
+                    # ensure subst_risk_dir is defined so later logic that references it won't fail
+                    subst_risk_dir = cas_dir / "substantialRiskReports"
 
-                 if pdf_link_list:
-                     # Add discovered PDF links to the global accumulator (will be flushed to disk in batches)
-                     # For now we are simply trusting this to work and assuming success at this point.
-                     _accumulate_pdf_links_for_cas(cas_dir, pdf_link_list)
-                     result['pdf']['success'] = True
-                     result['pdf']['local_file_path'] = str(cas_dir / "substantialRiskReports")
-                     result['pdf']['navigate_via'] = url
-                 # else: if we didn't find a list we are going to log this as a failure below
+                if pdf_link_list:
+                    # Add discovered PDF links to the global accumulator (will be flushed to disk in batches)
+                    download_plan.add_links_to_plan(download_plan.DOWNLOAD_PLAN_ACCUM, "", subst_risk_dir, pdf_link_list)
+                    result['pdf']['success'] = True
+                    result['pdf']['local_file_path'] = str(subst_risk_dir)
+                    result['pdf']['navigate_via'] = url
+                    #input("links added to plan, hit enter to continue")
+                # else: if we didn't find a list we are going to log this as a failure below
         else:
             msg = "No Substantial Risk / 8e links found on initial page"
             logger.error(msg)
             result['html']['error'] = msg
             result['pdf']['error'] = msg
             # continue to try summary links anyway
-       # Process summary links (these open summary/table overlays; no PDFs expected)
+        # Process summary links (these open summary/table overlays; no PDFs expected)
         if summary_link_list and len(summary_link_list) > 0:
             for sidx, summary_anchor in enumerate(summary_link_list, start=1):
                 modal_locator = click_summary_anchor_link_and_wait_for_modal(page, summary_anchor)
@@ -252,7 +169,6 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
             logger.debug("No summary links found on initial page (or none visible)")
             # Note we're intentionally not recording this as an error.
             # Not all overview modals have summary links.
-
     else:
         msg = "Navigation to chemical overview modal failed"
         logger.error(msg)
@@ -296,7 +212,10 @@ def scrape_sr_modal_html_and_gather_pdf_links(
     page, modal_locator, need_html: bool, need_pdf: bool, cas_dir: Path, cas_val, db, file_types: Any, url: str, result: Dict[str, Any], item_no: int = 1
 ) -> Any:
     logger.info(f"Processing Substantial Risk Reports modal {item_no}...")
-    pdf_link_list = None
+    #input("About to scrape SR modal. Press enter to continue")
+    # default reports directory (used if per-modal folder is not created)
+    subst_risk_dir = cas_dir / "substantialRiskReports"
+    pdf_link_list = []
     try:
         # The modal locator is required and should reference the modal body (or container) that is open.
         modal = modal_locator
@@ -343,7 +262,11 @@ def scrape_sr_modal_html_and_gather_pdf_links(
         if modal_body_html is not None and modal_body_html != "":
             if need_html:
                 logger.info("Saving modal HTML")
-                html_path = cas_dir / f"sr_{modal_ident_safe}.html"
+                # Create/ensure a folder for this Section5 item
+                subst_risk_dir = cas_dir / modal_ident_safe
+                logger.debug("Substantial risk dir: %s", subst_risk_dir)
+                subst_risk_dir.mkdir(parents=True, exist_ok=True)
+                html_path = subst_risk_dir / f"sr_{modal_ident_safe}.html"
                 with open(html_path, 'w', encoding='utf-8') as fh:
                     fh.write(modal_body_html)
                 logger.info("Saved modal HTML to %s", html_path)
@@ -369,14 +292,14 @@ def scrape_sr_modal_html_and_gather_pdf_links(
             else:
                 logger.warning("Close button not found in modal; skipping close")
 
-        return pdf_link_list
-
     except Exception as e:
         logger.exception("Error while processing the modal: %s", e)
         result['html']['error'] = f"Exception while processing modal: {e}"
         result['pdf']['error'] = f"Exception while processing modal: {e}"
 
-    return pdf_link_list
+    # Always return the found PDF links and the path the caller should use when recording files for this CAS
+    #input("have subst risk dir and pdf link list, check log, then hit enter")
+    return pdf_link_list, subst_risk_dir
 
 
 def click_sr_anchor_link_and_wait_for_modal(page, sr_link):
@@ -638,66 +561,7 @@ def download_pdfs(pdf_links: list[str], cas_dir: Path, session: Optional[request
             except Exception:
                 pass
 
-# def scrape_summary_modal_and_save(page, anchor, cas_dir: Path, filename: str):
-#     """Click the given anchor to open the summary overlay/modal, wait for #viewAllEndpointBody to be visible and populated,
-#     capture the modal innerHTML, and save to cas_dir/filename.
-#     Only use element_handle.click() for summary links to avoid double modal opening.
-#     """
-#     # (no extra imports needed here)
-#     try:
-#         # Click the anchor using only element_handle.click() to avoid double modal opening
-#         try:
-#             anchor.click()
-#             logger.debug("Clicked summary anchor via element_handle.click()")
-#         except Exception as e:
-#             logger.warning("Failed to click summary anchor via element_handle.click(): %s", e)
-#             return False
-#
-#         # Wait for #viewAllEndpointBody to be visible and populated
-#         try:
-#             page.wait_for_selector('#viewAllEndpointBody', timeout=8000, state='visible')
-#             # Optionally, wait for a table or heading inside the modal to appear
-#             page.wait_for_function(
-#                 "() => { const el = document.getElementById('viewAllEndpointBody'); return el && el.offsetParent !== null && el.innerText.trim().length > 0; }",
-#                 timeout=4000
-#             )
-#             logger.debug("Summary modal #viewAllEndpointBody is visible and populated")
-#         except Exception:
-#             logger.debug("Summary modal #viewAllEndpointBody did not appear or populate within timeout; attempting to capture anyway")
-#
-#         # Capture the modal HTML
-#         try:
-#             modal = page.query_selector('#viewAllEndpointBody')
-#             if not modal:
-#                 logger.error("No #viewAllEndpointBody found to capture for filename %s", filename)
-#                 return False
-#             modal_html = modal.inner_html()
-#         except Exception as e:
-#             logger.error("Failed to get inner_html of #viewAllEndpointBody: %s", e)
-#             return False
-#
-#         # Ensure reports dir exists
-#         cas_dir.mkdir(parents=True, exist_ok=True)
-#         out_path = cas_dir / filename
-#         try:
-#             with open(out_path, 'w', encoding='utf-8') as fh:
-#                 fh.write(f"<div id='viewAllEndpointBody'>\n{modal_html}\n</div>")
-#             logger.info("Saved summary modal HTML to %s", out_path)
-#         except Exception as e:
-#             logger.error("Failed to write summary HTML to %s: %s", out_path, e)
-#             return False
-#
-#         # Attempt to close the summary modal (click .close button if present, or hide modal)
-#         try:
-#             closed = page.evaluate("() => { const el = document.getElementById('viewAllEndpointBody'); if(!el) return false; const modal = el.closest('.modal'); if(!modal) return false; const btn = modal.querySelector('.close'); if(btn){ btn.click(); return true;} modal.style.display='none'; return true; }")
-#             logger.debug("Attempted to close summary modal (result=%s)", closed)
-#         except Exception:
-#             logger.exception("Failed to close summary modal after saving HTML")
-#
-#         return True
-#     except Exception as e:
-#         logger.exception("Error scraping summary modal: %s", e)
-#         return False
+
 
 def scrape_summary_modal_from_locator(modal_locator, cas_dir: Path, cas_val, item_no: int = 1) -> bool:
     """Capture the summary modal HTML using an already-open modal locator and save it to a file.
@@ -785,48 +649,3 @@ def scrape_summary_modal_from_locator(modal_locator, cas_dir: Path, cas_val, ite
     except Exception:
         logger.exception("Unexpected error capturing summary modal for CAS %s", cas_val)
         return False
-    # done
-
-def _flush_pdf_plan_accum(force: bool = False):
-    """Write the accumulated PDF plan to a timestamped JSON file in `pdfDownloadsToDo` and reset the accumulator.
-    If `force` is False, will only write if there is at least one CAS entry accumulated.
-    """
-    global PDF_PLAN_ACCUM, PDF_PLAN_ACCUM_CAS_SET, PDF_PLAN_ACCUM_CAS_SINCE_WRITE
-    if not PDF_PLAN_ACCUM.get('subfolderList'):
-        return None
-    # Ensure output folder exists
-    PDF_PLAN_OUT_DIR.mkdir(parents=True, exist_ok=True)
-    # Use save_download_plan to write the file
-    try:
-        path = save_download_plan(PDF_PLAN_ACCUM, PDF_PLAN_OUT_DIR)
-        logger.info("Flushed accumulated PDF plan to %s (cas_count=%d)", path, len(PDF_PLAN_ACCUM_CAS_SET))
-    except Exception:
-        logger.exception("Failed to flush accumulated PDF plan")
-        return None
-    # Reset accumulator
-    PDF_PLAN_ACCUM = {'folder': 'chemview_archive_8e', 'subfolderList': [], 'downloadList': []}
-    PDF_PLAN_ACCUM_CAS_SET.clear()
-    PDF_PLAN_ACCUM_CAS_SINCE_WRITE = 0
-    return path
-
-
-def _accumulate_pdf_links_for_cas(cas_dir: Path, pdf_links: list[str]):
-    """Add pdf_links to the module-level accumulator and flush to disk every PDF_PLAN_WRITE_BATCH_SIZE unique CAS entries."""
-    global PDF_PLAN_ACCUM, PDF_PLAN_ACCUM_CAS_SET, PDF_PLAN_ACCUM_CAS_SINCE_WRITE
-    if not pdf_links:
-        return
-    cas_folder_name = cas_dir.name
-    # Determine if this is a new CAS entry for the current accumulator
-    is_new_cas = cas_folder_name not in PDF_PLAN_ACCUM_CAS_SET
-    # Add links into the accumulator
-    add_pdf_links_to_plan(PDF_PLAN_ACCUM, cas_dir, pdf_links)
-    if is_new_cas:
-        PDF_PLAN_ACCUM_CAS_SET.add(cas_folder_name)
-        PDF_PLAN_ACCUM_CAS_SINCE_WRITE += 1
-    # Flush if we've reached the batch size
-    if PDF_PLAN_ACCUM_CAS_SINCE_WRITE >= PDF_PLAN_WRITE_BATCH_SIZE:
-        _flush_pdf_plan_accum()
-
-
-# Register an atexit handler so remaining accumulated plans are flushed when the process exits normally
-atexit.register(lambda: _flush_pdf_plan_accum(force=True))

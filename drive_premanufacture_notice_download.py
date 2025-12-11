@@ -130,9 +130,7 @@ def drive_premanufacture_notice_download(url, cas_val, cas_dir: Path, debug_out=
     # Record chemical info if we have enough data
     record_chemical_info(result, db)
 
-    # If we attempted processing then record failures for any file
-    # types that were explicitly set to False by the processing code.
-    # Success will have been logged at the point of processing.
+    # If we attempted processing then success or failure in the db
     # Note that "pdf" here is an umbrella term for all non-html downloads,
     # which could be pdfs, zips, or xmls.
     if result.get('attempted'):
