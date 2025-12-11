@@ -8,11 +8,10 @@ Risk and summary anchors, scrapes modal HTML, discovers PDF links, queues PDF do
 Designed for lazy initialization of `download_plan` to avoid import-time folder hard-coding and
 circular imports. Expected to be invoked by the framework with `page`, `db`, `file_types`, and `cas_dir`.
 """
-
 import requests
 import html as html_lib
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qsl, parse_qs, urlunparse, urlencode
 import logging
 from typing import Dict, Any, Optional
 from requests.adapters import HTTPAdapter
@@ -54,10 +53,18 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
         result['pdf']['error'] = msg
         return result
 
-    # TODO: for 8HQ-<value> ids that end in a letter, shortcircuit here
+    # For 8HQ-<value> ids that end in a letter, shortcircuit here
     # and skip processing. Cathy and I agree that all the 8HQ-<value>X
-    # entries have the same modal and download content as the plain
+    # entries dispaly the same modal and download content as the plain
     # 8HQ-<value> entry.
+    # Skip 8EHQ variants that end with a single letter (e.g., 8EHQ-20-21998A)
+    if (cas_val.startswith("8EHQ-")
+            and len(cas_val) > len("8EHQ-")
+            and cas_val[-1].isalpha()
+            and cas_val[-2].isdigit()):
+        logger.info(f"Skipping CAS variant {cas_val} that ends with a single letter")
+        return result
+
 
     need_html = db.need_download(cas_val, file_types.substantial_risk_html, retry_interval_hours=retry_interval_hours)
     need_pdf = db.need_download(cas_val, file_types.substantial_risk_pdf, retry_interval_hours=retry_interval_hours)
@@ -101,6 +108,10 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
         result['pdf']['success'] = False
     # from this point on down, we only need to set the msg value for failures
     # but will need to set 'success' to True on completed, confirmed successes.
+
+    # Many urls are missing the ch= query parameter. We will fix that, if needed,
+    # and also get 2 of our three chemical info bits of data
+    result, url = validate_url_and_get_chem_info_ids(url, cas_val, result)
 
     nav_ok = navigate_to_chemical_overview_modal(page, url)
     #input("you should see a chemical overview page. then hit enter.")
@@ -392,7 +403,64 @@ def click_summary_anchor_link_and_wait_for_modal(page, anchor, timeout: int = 10
         logger.debug("Summary modal not observed after clicking anchor", exc_info=True)
         return None
 
-    # done
+def validate_url_and_get_chem_info_ids(url, cas_val, result):
+    """Extract two values from the url, if we can:
+    - chem_id: which we then sanity check against the cas_val
+    - chem_db_id: extracted from modalId= in the URL
+
+    If chem_id is not found, then the url is defective (we are seeing this for most/all
+    chemicals with non-numeric cas_vals) and we need to repair it.
+
+    It is somewhat speculative to conclude that the modalId= value is the internal
+    chemview database id for the chemical, but this seems relatively likely given the fact
+    that the same value appears in a script element at the top of at least some of our
+    modal pages with contents like:
+          /*
+            <![CDATA[*/
+      var chemicalDataId = 45102733;
+      //]]>
+    """
+    chem_id = None
+    chem_db_id = None
+    result['chem_info'] = {
+        'chem_id': None,
+        'chem_db_id': None,
+        'chem_name': None  # to be filled later
+    }
+    try:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        modal_vals = qs.get('modalId')
+        if modal_vals:
+            chem_db_id = modal_vals[0]
+            logger.debug("Extracted modalId/chem_db_id %s from URL", chem_db_id)
+        else:
+            logger.warning("No modalId found in URL")
+        cas_vals = qs.get('ch')
+        if cas_vals:
+            chem_id = cas_vals[0]
+            logger.debug("Extracted chem_id %s from URL", chem_id)
+            # Sanity check chem_id against cas_val
+            if chem_id != cas_val:
+                logger.warning("chem_id %s from URL does not match cas_val %s, will use passed-in cas_val", chem_id,
+                               cas_val)
+                # if they don't match, use the primary value we trust: cas_val
+                chem_id = cas_val
+        else:
+            logger.info("No chem_id found in URL, will insert cas_val in URL and use for chem_id")
+            chem_id = cas_val
+            # Repair the URL by adding ch=<cas_val>
+            params = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if k.lower() != 'ch']
+            params.append(('ch', cas_val))
+            url = urlunparse(parsed._replace(query=urlencode(params, doseq=True)))
+    except Exception:
+        logger.exception("Exception while extracting ids from URL: %s", url)
+
+    result['chem_info']['chem_id'] = chem_id
+    result['chem_info']['chem_db_id'] = chem_db_id
+
+    return result, url
+
 
 def find_anchor_links_on_chemical_overview_modal(page):
     sr_link_list = []
