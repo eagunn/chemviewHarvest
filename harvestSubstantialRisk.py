@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    #input_file: str = "input_files/chemviewSubstRisksExport20251029.csv"
-    input_file: str = "input_files/srExportTest1.csv"
+    input_file: str = "input_files/substantialRiskReports20251211.csv"
+    #input_file: str = "input_files/srExportTest1.csv"
     archive_root: str = "H:/openSource/dataPreservation/chemView/harvest/chemview_archive_substantial_risk"
     db_path: str = "chemview_harvest.db"
     headless: bool = False  # headless false means the browser will be displayed
@@ -72,7 +72,7 @@ def main(argv=None):
     """
     initialize_config(argv)
     # Configure centralized logging for the process
-    initialize_logging(log_path="./harvestSubstantialRisk.log", level=logging.DEBUG)
+    initialize_logging(log_path="./logs/harvestSubstantialRisk.log", level=logging.DEBUG)
 
     logger.info("Starting Substantial Risk harvest via framework")
 

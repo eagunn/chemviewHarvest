@@ -187,6 +187,12 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
         result['pdf']['error'] = msg
         # do not return; allow post-loop logic to record failures
 
+    # Record chemical info if available (mirror pattern from premanufacture driver)
+    try:
+        record_chemical_info(result, db)
+    except Exception:
+        logger.exception("Exception while recording chemical info")
+
     # Post-loop: if we attempted processing then log failures for any file types that were explicitly set to False
     if result.get('attempted'):
         logger.debug(f"After modal scrape attempt, result = {result}")
@@ -285,6 +291,24 @@ def scrape_sr_modal_html_and_gather_pdf_links(
                 result['html']['local_file_path'] = str(html_path)
                 result['html']['navigate_via'] = url
 
+                # Attempt to extract chemical name from the modal and stash into result['chem_info']
+                try:
+                    name_locator = modal.locator("li:has-text('Chemical Name') span span").first
+                    chem_name = ""
+                    if name_locator.count() > 0:
+                        chem_name = name_locator.evaluate("el => el.innerText") or ""
+                    chem_name = re.sub(r'\s+', ' ', chem_name).strip()
+                    if chem_name:
+                        logger.debug("Extracted chemical name from modal: %s", chem_name)
+                        # ensure chem_info dict exists
+                        if not result.get('chem_info'):
+                            result['chem_info'] = {'chem_id': None, 'chem_db_id': None, 'chem_name': None}
+                        result['chem_info']['chem_name'] = chem_name
+                    else:
+                        logger.debug("Chemical name element not found or empty in modal")
+                except Exception:
+                    logger.exception("Error extracting chemical name from modal")
+
             pdf_link_list = []
             if need_pdf:
                 logger.debug("Finding PDF download links in the modal")
@@ -311,6 +335,23 @@ def scrape_sr_modal_html_and_gather_pdf_links(
     # Always return the found PDF links and the path the caller should use when recording files for this CAS
     #input("have subst risk dir and pdf link list, check log, then hit enter")
     return pdf_link_list, subst_risk_dir
+
+
+def record_chemical_info(result, db):
+    """Save chem info to DB if we have the three bits of info we need (chem_id, chem_db_id, chem_name)."""
+    chem_info = result.get('chem_info', {})
+    logger.debug("in record_chemical_info with chem_info: %s", chem_info)
+    if chem_info and chem_info.get('chem_id') and chem_info.get('chem_db_id') and chem_info.get('chem_name'):
+        try:
+            ok = db.save_chemical_info(chem_info['chem_id'], chem_info['chem_db_id'], chem_info['chem_name'])
+            if ok:
+                logger.debug("Saved chemical info: %s", chem_info)
+            else:
+                logger.error("HarvestDB.save_chemical_info indicated mismatch or failure for %s", chem_info)
+        except Exception:
+            logger.exception("Exception calling HarvestDB.save_chemical_info for %s", chem_info)
+    else:
+        logger.debug("Insufficient data to record chemical info: %s", chem_info)
 
 
 def click_sr_anchor_link_and_wait_for_modal(page, sr_link):
