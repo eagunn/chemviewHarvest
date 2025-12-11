@@ -1,9 +1,8 @@
 import logging
-from logging import handlers
 from logging.handlers import RotatingFileHandler
-import sys
+from pathlib import Path
 
-DEFAULT_LOG_PATH = "harvestSection5.log"
+DEFAULT_LOG_PATH = "logs/harvestSection5.log"
 FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-5s [%(name)s:%(lineno)d] %(message)s"
 DATEFMT = "%Y-%m-%d %H:%M:%S"
 
@@ -22,6 +21,13 @@ def initialize_logging(level=logging.INFO, log_path: str = DEFAULT_LOG_PATH, con
     root.setLevel(level)
 
     formatter = logging.Formatter(FORMAT, datefmt=DATEFMT)
+
+    # Ensure the parent directory for the log file exists
+    try:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # best-effort; if mkdir fails, let the handler raise the error
+        pass
 
     # File handler (rolling logs with max size 10 MB and 10 backups)
     file_handler = RotatingFileHandler(log_path, maxBytes=10 * 1024 * 1024, backupCount=10, encoding='utf-8')
