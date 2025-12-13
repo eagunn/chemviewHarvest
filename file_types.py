@@ -11,6 +11,8 @@ class FileTypes:
     new_chemical_notice_pdf = "new_chemical_notice_pdf"
     premanufacture_notice_html = "premanufacture_notice_html"
     premanufacture_notice_pdf = "premanufacture_notice_pdf"
+    snur_html = "snur_html"
+    snur_pdf = "snur_pdf"
 
 __all__ = ["FileTypes"]
 
