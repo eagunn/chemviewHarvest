@@ -184,9 +184,10 @@ def add_links_to_plan(plan: Dict[str, Any], cas_dir: Path, subfolder_name, links
     # Auto-save if threshold reached
     try:
         if DOWNLOAD_PLAN_ACCUM_CAS_SINCE_WRITE >= DOWNLOAD_PLAN_WRITE_BATCH_SIZE:
+            # write current module-level plan
             _write_plan_to_disk(DOWNLOAD_PLAN_ACCUM, DOWNLOAD_PLAN_OUT_DIR)
-            DOWNLOAD_PLAN_ACCUM_CAS_SINCE_WRITE = 0
-            DOWNLOAD_PLAN_ACCUM_CAS_SET.clear()
+            # Reinitialize the module-level plan (preserve configured top-level folder)
+            _reset_module_plan()
     except Exception:
         logger.exception("Failed to auto-save download plan")
 
@@ -212,6 +213,24 @@ def save_download_plan(plan: Dict[str, Any], debug_out: Path) -> Path:
         raise
 
 
+def _reset_module_plan(folder_name: str | None = None):
+    """Reset the module-level download plan accumulator and batching counters.
+    If folder_name is provided, preserve it as the top-level folder; otherwise preserve
+    the current DOWNLOAD_PLAN_ACCUM['folder'] or default to 'chemview_archive'.
+    """
+    global DOWNLOAD_PLAN_ACCUM, DOWNLOAD_PLAN_ACCUM_CAS_SET, DOWNLOAD_PLAN_ACCUM_CAS_SINCE_WRITE
+    # Determine the folder to preserve
+    if folder_name is None:
+        try:
+            folder_name = DOWNLOAD_PLAN_ACCUM.get('folder', 'chemview_archive')
+        except Exception:
+            folder_name = 'chemview_archive'
+    # Reinitialize
+    DOWNLOAD_PLAN_ACCUM = {'folder': folder_name, 'subfolderList': [], 'downloadList': []}
+    DOWNLOAD_PLAN_ACCUM_CAS_SET.clear()
+    DOWNLOAD_PLAN_ACCUM_CAS_SINCE_WRITE = 0
+
+
 def flush():
     """Force-write any pending plan to disk.
     Returns path to written file or None if nothing was written.
@@ -221,9 +240,8 @@ def flush():
         return None
     try:
         path = _write_plan_to_disk(DOWNLOAD_PLAN_ACCUM, DOWNLOAD_PLAN_OUT_DIR)
-        DOWNLOAD_PLAN_ACCUM = {'folder': DOWNLOAD_PLAN_ACCUM.get('folder', 'chemview_archive'), 'subfolderList': [], 'downloadList': []}
-        DOWNLOAD_PLAN_ACCUM_CAS_SET.clear()
-        DOWNLOAD_PLAN_ACCUM_CAS_SINCE_WRITE = 0
+        # Reset module-level plan preserving folder name
+        _reset_module_plan(DOWNLOAD_PLAN_ACCUM.get('folder', 'chemview_archive'))
         return path
     except Exception:
         logger.exception("Failed to flush download plan to disk")
