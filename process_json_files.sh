@@ -20,15 +20,18 @@ fi
 
 
 # Iterate over all .json files in the folder
+# as long as we haven't been signalled to stop
 for json_file in "${files[@]}"; do
-  # Run getFiles.py with the .json file as input
-  echo "Processing $json_file..."
-  python getFiles.py "$json_file"
-  rc=$?
-  if [ $rc -ne 0 ]; then
-    echo "getFiles.py failed with exit code $rc"
-    exit 3
-    break
+	if [ ! -f ./getFiles.stop ]; then
+	  # Run getFiles.py with the .json file as input
+	  echo "Processing $json_file..."
+	  python getFiles.py "$json_file"
+	  rc=$?
+	  if [ $rc -ne 0 ]; then
+		echo "getFiles.py failed with exit code $rc"
+		exit 3
+		break
+	fi
 fi
 
   if [ ! -f ./getFiles.stop ]; then
