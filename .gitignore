@@ -33,6 +33,7 @@ downloadsToDo/
 # report and other output files 
 *.txt
 *.out
+*.json
 
 # miscellany
 modal_population_resilience.md
