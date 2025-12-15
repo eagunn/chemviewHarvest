@@ -12,16 +12,20 @@ DOWNLOAD_PLAN_ACCUM: Dict[str, Any] = {'folder': 'chemview_archive', 'subfolderL
 DOWNLOAD_PLAN_ACCUM_CAS_SET: set = set()
 DOWNLOAD_PLAN_ACCUM_CAS_SINCE_WRITE: int = 0
 DOWNLOAD_PLAN_WRITE_BATCH_SIZE: int = 25
+#DOWNLOAD_PLAN_WRITE_BATCH_SIZE: int = 3  # for testing only
 DOWNLOAD_PLAN_OUT_DIR: Path = Path('downloadsToDo')
 
 
-def init(folder: str = 'chemview_archive', out_dir: Path | str = 'downloadsToDo', batch_size: int = 25):
+def init(folder: str = 'chemview_archive',
+         out_dir: Path | str = 'downloadsToDo',
+         batch_size: int | None = None):
     """Initialize module-level plan state. Call from driver to configure folder names and write behaviour."""
     global DOWNLOAD_PLAN_ACCUM, DOWNLOAD_PLAN_ACCUM_CAS_SET, DOWNLOAD_PLAN_ACCUM_CAS_SINCE_WRITE, DOWNLOAD_PLAN_WRITE_BATCH_SIZE, DOWNLOAD_PLAN_OUT_DIR
     DOWNLOAD_PLAN_ACCUM = {'folder': folder, 'subfolderList': [], 'downloadList': []}
     DOWNLOAD_PLAN_ACCUM_CAS_SET = set()
     DOWNLOAD_PLAN_ACCUM_CAS_SINCE_WRITE = 0
-    DOWNLOAD_PLAN_WRITE_BATCH_SIZE = int(batch_size)
+    if batch_size is not None:
+        DOWNLOAD_PLAN_WRITE_BATCH_SIZE = int(batch_size)
     DOWNLOAD_PLAN_OUT_DIR = Path(out_dir)
     DOWNLOAD_PLAN_OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -173,23 +177,35 @@ def add_links_to_plan(plan: Dict[str, Any], cas_dir: Path, subfolder_name, links
         added += 1
 
     # track CAS for batching
+    # If this is a new CAS folder and we're operating on the module-level accumulator,
+    # ensure we don't split a single CAS across two files: if the accumulator is already
+    # at-or-above the batch threshold, flush first so the new CAS begins in a fresh file.
     if cas_folder_name not in DOWNLOAD_PLAN_ACCUM_CAS_SET:
+        if plan is DOWNLOAD_PLAN_ACCUM:
+            try:
+                logger.debug(
+                    "about to add new CAS %s; accumulator=%d, batch=%d",
+                    cas_folder_name,
+                    DOWNLOAD_PLAN_ACCUM_CAS_SINCE_WRITE,
+                    DOWNLOAD_PLAN_WRITE_BATCH_SIZE,
+                )
+                # If adding this CAS would exceed the batch, flush now so the CAS starts
+                # in a fresh output file and all its entries go to the same file.
+                if DOWNLOAD_PLAN_ACCUM_CAS_SINCE_WRITE >= DOWNLOAD_PLAN_WRITE_BATCH_SIZE:
+                    logger.info(
+                        "download plan threshold reached; flushing before adding CAS %s",
+                        cas_folder_name,
+                    )
+                    _write_plan_to_disk(DOWNLOAD_PLAN_ACCUM, DOWNLOAD_PLAN_OUT_DIR)
+                    _reset_module_plan()
+            except Exception:
+                logger.exception("Failed to auto-save download plan before adding new CAS")
+
         DOWNLOAD_PLAN_ACCUM_CAS_SET.add(cas_folder_name)
         DOWNLOAD_PLAN_ACCUM_CAS_SINCE_WRITE += 1
 
-    # If our plan variable is the module's plan, update module-level reference
-    if plan is not DOWNLOAD_PLAN_ACCUM:
-        pass
-
-    # Auto-save if threshold reached
-    try:
-        if DOWNLOAD_PLAN_ACCUM_CAS_SINCE_WRITE >= DOWNLOAD_PLAN_WRITE_BATCH_SIZE:
-            # write current module-level plan
-            _write_plan_to_disk(DOWNLOAD_PLAN_ACCUM, DOWNLOAD_PLAN_OUT_DIR)
-            # Reinitialize the module-level plan (preserve configured top-level folder)
-            _reset_module_plan()
-    except Exception:
-        logger.exception("Failed to auto-save download plan")
+    # Note: auto-save-after-add removed. We flush before adding a new CAS to avoid
+    # splitting a CAS across files; additional auto-save here would be redundant.
 
     return added, skipped_duplicates
 
