@@ -19,6 +19,7 @@ import logging
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, parse_qsl
 import time
 import download_plan
+import re
 
 # External deps (ensure installed): requests, bs4
 import requests
@@ -99,6 +100,18 @@ def get_json(session: requests.Session, url: str, timeout: int = 30) -> Optional
     except Exception:
         logger.exception("get_json: failed to GET/parse JSON from %s", url)
         return None
+
+
+def sanitize_cfr_id(cfr_id_text: str) -> str:
+    """Return a filesystem-safe identifier from a CFR id text.
+
+    Example: '40 CFR 721.10210' -> '40_CFR_721_10210'
+    """
+    if not cfr_id_text:
+        return ''
+    cleaned = re.sub(r'[^A-Za-z0-9]+', '_', cfr_id_text.strip())
+    cleaned = re.sub(r'_+', '_', cleaned).strip('_')
+    return cleaned
 
 
 def _extract_chemical_database_ids(json_obj: Dict[str, Any], source_id: Optional[str] = None) -> List[str]:
@@ -238,51 +251,25 @@ def parse_modal_html_for_notice_and_links(html: str) -> Dict[str, Any]:
 
     """
     Parse modal HTML (string) and extract:
-      - notice_id: canonical identifier for the modal (string)
-      - notice_safe_name: sanitized filename-friendly name
-      - modal_html: the raw html to save
-      - zip_links: list of download URLs (strings)
-      - chem_name: optional chemical name
-      - chem_db_id: optional internal db id
+    cfr_citation -- where/when the snur was published
+    cfr_id -- best id for the snur
+    chem_name
 
-    Simplified: assume all hrefs in the modal are full, absolute URLs.
-    Collect anchors whose visible text contains 'Download zip' (case-insensitive)
-    or whose href contains 'mediaType=zip' or ends with '.zip'.
+    Note, there are links to pdfs on this page that we could capture for
+    later download. But all of them are to FR pages/docs that cover multiple
+    chemicals and/or multiple new uses. It doesn't seem appropriate to store
+    that info local to this single chemical/snur.
+
     """
-    #logger.debug(f"In parse_modal_html_for_notice_and_links (simplified): {html}")
+    #logger.debug(f"In parse_modal_html_for_notice_and_links: {html}")
     soup = BeautifulSoup(html, "html.parser")
     result = {
-        "notice_id": None,
-        "notice_safe_name": None,
-        "modal_html": html,
-        "zip_links": [],
         "chem_name": None,
-        "chem_db_id": None,
+        "cfr_citation": None,
+        "cfr_id": None
     }
 
-    # 1) try to find an identifying element
-    ident = soup.select_one("span#Notice_Number")
-    if ident and ident.text:
-        result["notice_id"] = ident.text.strip()
-        result["notice_safe_name"] = "".join(c if c.isalnum() or c in "-_" else "_" for c in result["notice_id"])
-
-    # 2) find anchors that look like zip downloads; assume hrefs are absolute
-    zip_links: List[str] = []
-    for a in soup.find_all('a'):
-        try:
-            text = (a.get_text() or '').strip().lower()
-            href = (a.get('href') or '').strip()
-            href_l = href.lower()
-            if 'download zip' in text or 'mediastype=zip' in href_l or href_l.endswith('.zip'):
-                if href and href not in zip_links:
-                    zip_links.append(href)
-        except Exception:
-            # Skip any malformed anchors
-            continue
-    logger.debug("found %d zip links", len(zip_links))
-    result['zip_links'] = zip_links
-
-    # 3) try to extract chemical name if present (best-effort)
+    # Extract chemical name if present (best-effort)
     try:
         # Find the <strong> element whose text starts with 'Chemical Name'
         strong = soup.find('strong', text=lambda s: s and s.strip().lower().startswith('chemical name'))
@@ -305,16 +292,65 @@ def parse_modal_html_for_notice_and_links(html: str) -> Dict[str, Any]:
                     else:
                         # Fallback: use outer span text
                         chem_text = span.text.strip()
-                        logger.debug(f"Fallback chemical name text: {chem_text}")
+                        logger.warning(f"Fallback chemical name text: {chem_text}")
                         result['chem_name'] = chem_text
                 else:
-                    logger.debug("No <span> found inside <li> for chemical name")
+                    logger.warning("No <span> found inside <li> for chemical name")
             else:
-                logger.debug("No parent <li> found for chemical name <strong>")
+                logger.warning("No parent <li> found for chemical name <strong>")
         else:
-            logger.debug("No <strong> found for chemical name")
+            logger.warning("No <strong> found for chemical name")
     except Exception as e:
-        logger.debug(f'Failed to extract chemical name from modal HTML: {e}')
+        logger.warning(f'Failed to extract chemical name from modal HTML: {e}')
+
+    # Extract cfr citation if present (best-effort)
+    try:
+        # Find the <strong> element whose text starts with 'Federal Register Citation'
+        frc_strong = soup.find('strong', text=lambda s: s and s.strip().lower().startswith('federal register citation'))
+        if frc_strong:
+            frc_li = frc_strong.find_parent('li')
+            if frc_li:
+                frc_a = frc_li.find('a')
+                if frc_a and frc_a.text:
+                    frc_text = frc_a.get_text().strip()
+                    result['cfr_citation'] = frc_text
+                    logger.debug(f"Extracted Federal Register citation: {frc_text}")
+                else:
+                    logger.warning("Found Federal Register Citation <li> but no <a> with text inside it")
+            else:
+                logger.warning("Found Federal Register Citation <strong> but parent <li> not found")
+        else:
+            logger.warning("No <strong> element found for 'Federal Register Citation' in modal HTML")
+    except Exception as e:
+        logger.debug(f'Failed to extract Federal Register citation from modal HTML: {e}')
+
+    # Extract Code of Federal Regulations identifier (e.g., '40 CFR 721.10210')
+    # This is understood to be the most accurate id for the snur
+    try:
+        code_strong = soup.find('strong', text=lambda s: s and s.strip().lower().startswith('code of federal regulations'))
+        if code_strong:
+            code_li = code_strong.find_parent('li')
+            if code_li:
+                code_a = code_li.find('a')
+                if code_a and code_a.text:
+                    code_text = code_a.get_text().strip()
+                    result['cfr_id'] = code_text
+                    logger.debug(f"Extracted CFR id: {code_text}")
+                else:
+                    # Fallback: check for text in the <li> indicating this is a proposed regulation
+                    # Example (sampleSNURproposed.html): a span contains 'None applicable. This is a proposed regulation.'
+                    li_text = ' '.join([s.strip() for s in code_li.stripped_strings if s and s.strip()])
+                    if 'proposed regulation' in li_text.lower() or 'proposed' in li_text.lower():
+                        result['cfr_id'] = 'proposed'
+                        logger.debug("Detected proposed regulation in CFR <li>; set cfr_id='proposed'")
+                    else:
+                        logger.warning("Found 'Code of Federal Regulations' <li> but no <a> with text inside it")
+            else:
+                logger.warning("Found 'Code of Federal Regulations' <strong> but parent <li> not found")
+        else:
+            logger.warning("No <strong> element found for 'Code of Federal Regulations' in modal HTML")
+    except Exception as e:
+        logger.debug(f'Failed to extract CFR id from modal HTML: {e}')
 
     logger.debug("parse modal result: %s", result)
     return result
@@ -367,7 +403,8 @@ def drive_snur_download(url, cas_val, cas_dir: Path, debug_out=None, headless=Tr
 
     # Use db records to determine if we should try/retry this download now
     need_html = db.need_download(cas_val, file_types.snur_html, retry_interval_hours=retry_interval_hours)
-    need_pdf = db.need_download(cas_val, file_types.snur_pdf, retry_interval_hours=retry_interval_hours)
+    #need_pdf = db.need_download(cas_val, file_types.snur_pdf, retry_interval_hours=retry_interval_hours)
+    need_pdf = False # we don't download any files, pdf or zip, for snurs
 
     if not need_html and not need_pdf:
         logger.info("No downloads needed for cas=%s (Significate New Use Report)", cas_val)
@@ -417,18 +454,23 @@ def drive_snur_download(url, cas_val, cas_dir: Path, debug_out=None, headless=Tr
             if not html:
                 logger.warning("Failed to fetch modal HTML from %s", modal_url)
                 continue
-
             parsed = parse_modal_html_for_notice_and_links(html)
             result["chem_info"]['chem_name'] = parsed.get('chem_name')
-            notice_id = parsed.get("notice_id") or "unknown"
-            notice_safe = parsed.get("notice_safe_name") or notice_id or "item"
+            cfr_id_text = parsed.get('cfr_id')
+            # Create a safe single-token identifier for CFR-based folder/filename use
+            safe_cfr_id = None
+            if cfr_id_text:
+                safe_cfr_id = sanitize_cfr_id(cfr_id_text)
+            else:
+                logger.warning('No CFR id text found to sanitize for cas %s', cas_val)
+                safe_cfr_id = "unknown"
             # ensure cas_dir exists
             cas_dir = Path(cas_dir)
             cas_dir.mkdir(parents=True, exist_ok=True)
             # save modal HTML
-            notice_dir = cas_dir / notice_safe
-            notice_dir.mkdir(parents=True, exist_ok=True)
-            html_path = notice_dir / f"snur_{notice_safe}.html"
+            snur_dir = cas_dir / safe_cfr_id
+            snur_dir.mkdir(parents=True, exist_ok=True)
+            html_path = snur_dir / f"snur_{safe_cfr_id}.html"
 
             try:
                 html_path.write_text(parsed.get("modal_html", html), encoding="utf-8")
@@ -438,16 +480,6 @@ def drive_snur_download(url, cas_val, cas_dir: Path, debug_out=None, headless=Tr
                 result["html"]["navigate_via"] = modal_url
             except Exception:
                 logger.exception("Failed to save modal HTML to %s", html_path)
-
-            # add zip links to plan if present
-            zip_links = parsed.get("zip_links", []) or []
-            if zip_links:
-                # Example subfolder path: "snur/<notice_safe>/supporting_docs"
-                subfolder = cas_dir / notice_safe / "supporting_docs"
-                add_plan_links_for_notice(cas_dir, subfolder, zip_links)
-                result["pdf"]["success"] = True
-                result["pdf"]["local_file_path"] = str(cas_dir / subfolder)
-                result["pdf"]["navigate_via"] = modal_url
 
         # Record chemical info if we have enough data
         record_chemical_info(result, db)

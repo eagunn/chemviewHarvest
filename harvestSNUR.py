@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    #input_file: str = "input_files/snur20251213.csv"
-    input_file: str = "input_files/snurExportTest.csv"
+    input_file: str = "input_files/snur20251213.csv"
+    #input_file: str = "input_files/snurExportTest.csv"
     archive_root: str = "H:/openSource/dataPreservation/chemView/harvest/chemview_archive_snur"
     db_path: str = "chemview_harvest.db"
     headless: bool = False  # headless false means the browser will be displayed
