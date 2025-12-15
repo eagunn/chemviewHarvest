@@ -165,16 +165,24 @@ def run_harvest(config: Any, drive_func: Callable[..., dict], file_types: Any):
                 logger.warning("missing url or cas_val (url=%s, cas_val=%s), skipping this entry", url, cas_val)
                 continue
 
-            # We will the driver decide whether downloads are needed or not,
+            # We will let the driver decide whether downloads are needed or not,
             # so we'll let it decide when/if to create new chemical folders, too.
             # Note that both the postponement of folder creating and
             # insertion of the data_type subfolder is new behavior
             # as of work on New Chemical Notices. Files for the other data types will have
             # be reorganized later.
+            # We do set the chemical id folder name here, which becomes part of the root
+            # path for all subsequent files. And we've chosen to append CAS- to all the
+            # "regular" ids. (Whether this was a great idea or not, I leave it to time
+            # to decide. But a few hundred GB into downloading, I'm not changing the
+            # design now.) Most of the chemical ids that start with a number should have
+            # the CAS- prepended. However, there are two groups of ids, found in Substantial Risk
+            # reports, that start with '8E-' and '8EHQ-' that we want to leave as is.
             cas_dir = None
             if cas_val:
                 cas_clean = str(cas_val).strip()
-                if (cas_clean[0].isdigit()):
+                if (cas_clean[0].isdigit()
+                    and cas_clean.lower().startswith("8e") != True):
                     cas_clean = f"CAS-{cas_clean}"
                 cas_dir = Path(config.archive_root) / cas_clean / config.data_type
 

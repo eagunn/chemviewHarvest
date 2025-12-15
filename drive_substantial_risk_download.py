@@ -53,7 +53,7 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
         result['pdf']['error'] = msg
         return result
 
-    # For 8HQ-<value> ids that end in a letter, shortcircuit here
+    # For 8EHQ-<value> ids that end in a letter, shortcircuit here
     # and skip processing. Cathy and I agree that all the 8HQ-<value>X
     # entries dispaly the same modal and download content as the plain
     # 8HQ-<value> entry.
@@ -90,7 +90,7 @@ def drive_substantial_risk_download(url, cas_val, cas_dir: Path, debug_out=None,
             folder_name = archive_root
         except Exception:
             folder_name = _DOWNLOAD_PLAN_DEFAULT_FOLDER
-        download_plan.init(folder=folder_name, out_dir=Path('downloadsToDo'), batch_size=25)
+        download_plan.init(folder=folder_name, out_dir=Path('downloadsToDo'))
         atexit.register(download_plan.flush)
         _DOWNLOAD_PLAN_INITIALIZED = True
 

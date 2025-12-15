@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    input_file: str = "input_files/substantialRiskReports20251211.csv"
+    input_file: str = "input_files/substantialRiskReports20251215.csv"
     #input_file: str = "input_files/srExportTest1.csv"
     archive_root: str = "H:/openSource/dataPreservation/chemView/harvest/chemview_archive_substantial_risk"
     db_path: str = "chemview_harvest.db"
